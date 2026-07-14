@@ -2,6 +2,8 @@
 
 A Model Context Protocol (MCP) server that provides semantic search and knowledge graph capabilities for Obsidian vaults using Smart Connections embeddings.
 
+> **Fork note:** this is a fork maintained by [A Portland Career](https://aportlandcareer.com) for its second-brain pilot kit, based on the original [`smart-connections-mcp` by Daniel Glickman](https://github.com/msdanyg/smart-connections-mcp) (MIT). It adds true semantic `search_notes` (embeds the query with the vault's model instead of literal keyword matching); see "Query embedding" below. Original copyright and MIT license preserved in `LICENSE`.
+
 ## Overview
 
 This MCP server allows Claude (and other MCP clients) to:
@@ -37,7 +39,7 @@ Retrieve full note content or specific sections/blocks with intelligent extracti
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/msdanyg/smart-connections-mcp.git
+   git clone https://github.com/bookbran/smart-connections-mcp.git
    cd smart-connections-mcp
    ```
 
@@ -363,7 +365,8 @@ MIT
 
 ## Author
 
-Daniel Glickman
+- Original: Daniel Glickman ([msdanyg/smart-connections-mcp](https://github.com/msdanyg/smart-connections-mcp))
+- Fork maintained by: A Portland Career (semantic `search_notes` + pilot-kit integration)
 
 ## Acknowledgments
 
