@@ -152,12 +152,14 @@ Build a multi-level connection graph showing how notes are semantically connecte
 
 ### 3. `search_notes`
 
-Search notes using a text query (keyword-based, ranked by relevance).
+Semantic search by text query. Embeds the query with the **same** model used for the vault's note embeddings (bge-micro-v2) and ranks notes by cosine similarity, so it matches by meaning rather than exact words. Falls back to a multi-term keyword search if the embedding model can't be loaded (e.g. fully offline before the model has ever been cached).
+
+> **First-query note:** the query-embedding model is downloaded from the Hugging Face hub on the **first** `search_notes` call of a server session (needs network once, ~30s), then cached under `node_modules/@huggingface/transformers/.cache` so every later call is offline and fast (~4ms). See "Query embedding" under Technical Details.
 
 **Parameters:**
 - `query` (string, required): Search query text
 - `limit` (number, optional): Maximum results, default 10
-- `threshold` (number, optional): Relevance threshold 0-1, default 0.5
+- `threshold` (number, optional): Similarity threshold 0-1, default 0.4 (typical relevant matches score ~0.4-0.75; lower to widen recall)
 
 **Example:**
 ```typescript
@@ -282,6 +284,14 @@ Once configured, you can ask Claude to use these tools naturally:
 - **Model**: TaylorAI/bge-micro-v2
 - **Dimensions**: 384
 - **Similarity Metric**: Cosine similarity
+
+### Query embedding (`search_notes`)
+`get_similar_notes` / `get_connection_graph` compare notes against each other using the vectors Smart Connections already stored, so they need no model at runtime. `search_notes` is different: it must turn an arbitrary text query into a vector to compare against those stored vectors. It does this with `@huggingface/transformers` (transformers.js), loading the **same** model the vault is configured for (read from `smart_env.json`, e.g. `TaylorAI/bge-micro-v2`) so the query and note vectors live in the same space.
+
+- The model repo is tried in order: the vault's configured `model_key`, then `SC_EMBED_MODEL` (env override), then `TaylorAI/bge-micro-v2`, then `Xenova/bge-micro-v2`.
+- ONNX weights download from the Hugging Face hub on first use and are cached under `node_modules/@huggingface/transformers/.cache`. First `search_notes` call: ~30s; subsequent calls: ~4ms, offline.
+- If no model can be loaded (offline with an empty cache), `search_notes` transparently falls back to a multi-term keyword search so it still returns useful results.
+- Override the model with the `SC_EMBED_MODEL` env var if your vault uses a different embedding model. It must be a bge-micro-v2-family model, or the query vectors won't match the stored note vectors.
 
 ### Data Format
 The server reads from Obsidian's Smart Connections `.smart-env/` directory:

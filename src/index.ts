@@ -69,7 +69,7 @@ const GetConnectionGraphSchema = z.object({
 const SearchNotesSchema = z.object({
   query: z.string().describe('Search query text'),
   limit: z.number().int().positive().default(10).describe('Maximum number of results'),
-  threshold: z.number().min(0).max(1).default(0.5).describe('Similarity threshold (0-1)'),
+  threshold: z.number().min(0).max(1).default(0.4).describe('Similarity threshold (0-1)'),
 });
 
 const GetEmbeddingNeighborsSchema = z.object({
@@ -149,7 +149,7 @@ const tools: Tool[] = [
   },
   {
     name: 'search_notes',
-    description: 'Search for notes using a text query. Returns notes ranked by relevance with similarity scores.',
+    description: 'Semantic search: embeds the text query with the same model used for the note embeddings (bge-micro-v2) and returns notes ranked by cosine similarity. Falls back to multi-term keyword search if the embedding model is unavailable. Typical relevant matches score ~0.4-0.75; lower the threshold to widen recall.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -165,10 +165,10 @@ const tools: Tool[] = [
         },
         threshold: {
           type: 'number',
-          description: 'Similarity threshold (0-1), default 0.5',
+          description: 'Similarity threshold (0-1), default 0.4',
           minimum: 0,
           maximum: 1,
-          default: 0.5,
+          default: 0.4,
         },
       },
       required: ['query'],
@@ -270,7 +270,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'search_notes': {
         const { query, limit, threshold } = SearchNotesSchema.parse(args);
-        const results = searchEngine.searchByQuery(query, limit, threshold);
+        const results = await searchEngine.searchByQuery(query, limit, threshold);
         return {
           content: [
             {

@@ -2,6 +2,17 @@
  * Semantic search engine for Smart Connections
  */
 import { findNearestNeighbors } from './embedding-utils.js';
+import { embedText } from './embedder.js';
+function escapeRegExp(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+// Common English stopwords dropped from lexical fallback queries.
+const STOPWORDS = new Set([
+    'the', 'a', 'an', 'and', 'or', 'but', 'of', 'to', 'in', 'on', 'for', 'with',
+    'is', 'are', 'was', 'were', 'be', 'been', 'it', 'this', 'that', 'these',
+    'those', 'as', 'at', 'by', 'from', 'about', 'into', 'how', 'what', 'when',
+    'who', 'which', 'i', 'you', 'we', 'they', 'do', 'does', 'my', 'our',
+]);
 export class SearchEngine {
     loader;
     embeddingModelKey;
@@ -114,37 +125,76 @@ export class SearchEngine {
         };
     }
     /**
-     * Search notes by content similarity
+     * Search notes by semantic similarity to a text query.
+     *
+     * Embeds the query with the same model used for the stored note embeddings
+     * (bge-micro-v2) and ranks notes by cosine similarity. If the embedding model
+     * can't be loaded (e.g. offline with no cached model), falls back to a
+     * multi-term lexical search so the tool still returns useful results.
      */
-    searchByQuery(queryText, limit = 10, threshold = 0.5) {
-        // For now, we'll do a simple keyword match since we don't have
-        // a way to generate embeddings for arbitrary text without the model.
-        // In a full implementation, you'd call the embedding model here.
+    async searchByQuery(queryText, limit = 10, threshold = 0.4) {
+        try {
+            const queryVec = await embedText(queryText, this.embeddingModelKey);
+            if (queryVec.length > 0) {
+                return this.getEmbeddingNeighbors(queryVec, limit, threshold);
+            }
+        }
+        catch (error) {
+            console.error('Semantic search unavailable, falling back to lexical:', error);
+        }
+        return this.searchByKeyword(queryText, limit, threshold);
+    }
+    /**
+     * Lexical fallback: multi-term keyword scoring.
+     *
+     * Unlike the previous implementation, this tokenizes the query into terms
+     * (dropping stopwords) and scores by how many distinct query terms a note
+     * contains (coverage) plus a small term-frequency bonus. This means
+     * multi-word queries like "intake call guide" match notes that contain those
+     * words anywhere, instead of requiring the exact phrase as a literal
+     * substring. Scores are normalized to 0-1 so `threshold` is meaningful.
+     */
+    searchByKeyword(queryText, limit = 10, threshold = 0.4) {
+        const terms = Array.from(new Set(queryText
+            .toLowerCase()
+            .split(/[^a-z0-9]+/)
+            .filter((t) => t.length > 1 && !STOPWORDS.has(t))));
+        if (terms.length === 0) {
+            return [];
+        }
         const results = [];
-        const queryLower = queryText.toLowerCase();
         for (const [path, source] of this.loader.getSources()) {
             try {
-                const content = this.loader.readNoteContent(path).toLowerCase();
-                // Simple relevance scoring based on keyword matches
-                const matches = (content.match(new RegExp(queryLower, 'gi')) || []).length;
-                if (matches > 0) {
-                    // Normalize score (this is a crude approximation)
-                    const score = Math.min(matches / 10, 1.0);
-                    if (score >= threshold) {
-                        results.push({
-                            path,
-                            similarity: score,
-                            blocks: Object.keys(source.blocks || {})
-                        });
+                // Include the path/title so filename matches count too.
+                const haystack = (path + '\n' + this.loader.readNoteContent(path)).toLowerCase();
+                let matchedTerms = 0;
+                let totalMatches = 0;
+                for (const term of terms) {
+                    const count = (haystack.match(new RegExp(escapeRegExp(term), 'g')) || []).length;
+                    if (count > 0) {
+                        matchedTerms++;
+                        totalMatches += count;
                     }
+                }
+                if (matchedTerms === 0)
+                    continue;
+                // Coverage (how many distinct query terms appear) dominates; term
+                // frequency is a light tiebreaker.
+                const coverage = matchedTerms / terms.length;
+                const tfBonus = Math.min(totalMatches / (terms.length * 8), 1);
+                const score = coverage * 0.8 + tfBonus * 0.2;
+                if (score >= threshold) {
+                    results.push({
+                        path,
+                        similarity: score,
+                        blocks: Object.keys(source.blocks || {}),
+                    });
                 }
             }
             catch (error) {
-                // Skip notes that can't be read
                 continue;
             }
         }
-        // Sort by similarity and limit
         return results
             .sort((a, b) => b.similarity - a.similarity)
             .slice(0, limit);
