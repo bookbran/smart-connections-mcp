@@ -5,6 +5,7 @@
 import type { SmartSource, SimilarNote, ConnectionNode, ConnectionGraph, NoteContent } from './types.js';
 import { cosineSimilarity, findNearestNeighbors } from './embedding-utils.js';
 import { embedText } from './embedder.js';
+import { buildSupplementalIndex, type SupplementalIndex } from './vault-indexer.js';
 import type { SmartConnectionsLoader } from './smart-connections-loader.js';
 
 function escapeRegExp(str: string): string {
@@ -22,6 +23,7 @@ const STOPWORDS = new Set([
 export class SearchEngine {
   private loader: SmartConnectionsLoader;
   private embeddingModelKey: string;
+  private supplementalPromise: Promise<SupplementalIndex> | null = null;
 
   constructor(loader: SmartConnectionsLoader) {
     this.loader = loader;
@@ -200,7 +202,29 @@ export class SearchEngine {
     try {
       const queryVec = await embedText(queryText, this.embeddingModelKey);
       if (queryVec.length > 0) {
-        return this.getEmbeddingNeighbors(queryVec, limit, threshold);
+        // Notes written since Obsidian last indexed are absent from the plugin's
+        // data. Leaving them out means confidently returning the second-best
+        // answer while the best one is invisible, so they are embedded here and
+        // searched alongside. See `vault-indexer`.
+        const supplemental = await this.getSupplementalIndex();
+        if (supplemental.vectors.size === 0) {
+          return this.getEmbeddingNeighbors(queryVec, limit, threshold);
+        }
+        const vectors = Array.from(this.loader.getSources().entries())
+          .map(([path, src]) => ({
+            id: path,
+            vec: src.embeddings[this.embeddingModelKey]?.vec || [],
+            metadata: { blocks: Object.keys(src.blocks || {}), lastModified: 0 },
+          }))
+          .filter((item) => item.vec.length > 0);
+        for (const [path, vec] of supplemental.vectors) {
+          vectors.push({ id: path, vec, metadata: { blocks: [], lastModified: 0 } });
+        }
+        return findNearestNeighbors(queryVec, vectors, limit, threshold).map((n) => ({
+          path: n.id,
+          similarity: n.similarity,
+          blocks: n.metadata.blocks,
+        }));
       }
     } catch (error) {
       console.error('Semantic search unavailable, falling back to lexical:', error);
@@ -219,6 +243,23 @@ export class SearchEngine {
    * words anywhere, instead of requiring the exact phrase as a literal
    * substring. Scores are normalized to 0-1 so `threshold` is meaningful.
    */
+  /**
+   * Built once per server run and reused; the on-disk cache makes a restart cheap.
+   */
+  private async getSupplementalIndex() {
+    if (!this.supplementalPromise) {
+      this.supplementalPromise = buildSupplementalIndex(
+        this.loader.getVaultPath(),
+        new Set(this.loader.getSources().keys())
+      ).catch(() => ({
+        vectors: new Map<string, number[]>(),
+        newlyEmbedded: 0,
+        missingFromPlugin: 0,
+      }));
+    }
+    return this.supplementalPromise;
+  }
+
   searchByKeyword(
     queryText: string,
     limit: number = 10,

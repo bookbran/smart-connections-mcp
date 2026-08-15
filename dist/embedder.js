@@ -74,10 +74,31 @@ export async function embedText(text, preferredModel) {
         return [];
     }
     const extractor = await getExtractor(preferredModel);
-    const output = await extractor(trimmed, { pooling: 'mean', normalize: true });
-    // transformers.js returns a Tensor with a typed-array `.data`.
-    return Array.from(output.data).map(Number);
+    // The model holds 512 positions and this tokenizer declares no max length, so
+    // `truncation: true` has nothing to truncate to and oversized input reaches
+    // ONNX, which dies inside the positional-embedding add with an unreadable
+    // broadcast error. Short queries never hit this, which is why it went
+    // unnoticed; embedding whole NOTES does. Measured: 1000 characters is safe,
+    // 2000 is not, and the ceiling moves with how densely the text tokenizes, so
+    // budget conservatively and step down rather than trusting one number.
+    let lastError;
+    for (const budget of [SAFE_CHARS, Math.floor(SAFE_CHARS / 2), Math.floor(SAFE_CHARS / 4)]) {
+        try {
+            const output = await extractor(trimmed.slice(0, budget), {
+                pooling: 'mean',
+                normalize: true,
+            });
+            // transformers.js returns a Tensor with a typed-array `.data`.
+            return Array.from(output.data).map(Number);
+        }
+        catch (e) {
+            lastError = e;
+        }
+    }
+    throw lastError;
 }
+/** Characters, not tokens, because the tokenizer will not tell us in advance. */
+const SAFE_CHARS = 1200;
 /**
  * Whether the embedding model is available. Attempts to load it; returns false
  * if loading fails (e.g. offline with no cached model), so callers can fall

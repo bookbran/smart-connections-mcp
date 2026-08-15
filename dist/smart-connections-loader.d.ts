@@ -7,11 +7,27 @@ export declare class SmartConnectionsLoader {
     private smartEnvPath;
     private config;
     private sources;
+    private pluginIndexAvailable;
+    private initError;
     constructor(vaultPath: string);
     /**
      * Initialize and load all Smart Connections data
      */
+    /**
+     * Start up, with or without Smart Connections.
+     *
+     * This used to throw when `.smart-env` was missing, which killed the whole
+     * server and made the Obsidian plugin a hard prerequisite for any semantic
+     * search. `.smart-env` is gitignored so it never travels with the vault, which
+     * means every machine either builds its own index or has none, and "has none"
+     * was fatal. Since the server can embed notes itself now, the plugin is an
+     * optimisation: where it has run we use its per-block work, where it has not we
+     * start empty and the supplemental indexer covers the vault.
+     */
     initialize(): Promise<void>;
+    /** False when Smart Connections has never indexed this vault on this machine. */
+    hasPluginIndex(): boolean;
+    getInitError(): string | null;
     /**
      * Load smart_env.json configuration
      */

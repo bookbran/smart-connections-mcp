@@ -6,6 +6,7 @@ import type { SmartConnectionsLoader } from './smart-connections-loader.js';
 export declare class SearchEngine {
     private loader;
     private embeddingModelKey;
+    private supplementalPromise;
     constructor(loader: SmartConnectionsLoader);
     /**
      * Find similar notes to a given note path
@@ -38,6 +39,10 @@ export declare class SearchEngine {
      * words anywhere, instead of requiring the exact phrase as a literal
      * substring. Scores are normalized to 0-1 so `threshold` is meaningful.
      */
+    /**
+     * Built once per server run and reused; the on-disk cache makes a restart cheap.
+     */
+    private getSupplementalIndex;
     searchByKeyword(queryText: string, limit?: number, threshold?: number): SimilarNote[];
     /**
      * Get note content with matched blocks highlighted

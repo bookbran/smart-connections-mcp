@@ -3,6 +3,7 @@
  */
 import { findNearestNeighbors } from './embedding-utils.js';
 import { embedText } from './embedder.js';
+import { buildSupplementalIndex } from './vault-indexer.js';
 function escapeRegExp(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -16,6 +17,7 @@ const STOPWORDS = new Set([
 export class SearchEngine {
     loader;
     embeddingModelKey;
+    supplementalPromise = null;
     constructor(loader) {
         this.loader = loader;
         this.embeddingModelKey = loader.getEmbeddingModelKey();
@@ -136,7 +138,29 @@ export class SearchEngine {
         try {
             const queryVec = await embedText(queryText, this.embeddingModelKey);
             if (queryVec.length > 0) {
-                return this.getEmbeddingNeighbors(queryVec, limit, threshold);
+                // Notes written since Obsidian last indexed are absent from the plugin's
+                // data. Leaving them out means confidently returning the second-best
+                // answer while the best one is invisible, so they are embedded here and
+                // searched alongside. See `vault-indexer`.
+                const supplemental = await this.getSupplementalIndex();
+                if (supplemental.vectors.size === 0) {
+                    return this.getEmbeddingNeighbors(queryVec, limit, threshold);
+                }
+                const vectors = Array.from(this.loader.getSources().entries())
+                    .map(([path, src]) => ({
+                    id: path,
+                    vec: src.embeddings[this.embeddingModelKey]?.vec || [],
+                    metadata: { blocks: Object.keys(src.blocks || {}), lastModified: 0 },
+                }))
+                    .filter((item) => item.vec.length > 0);
+                for (const [path, vec] of supplemental.vectors) {
+                    vectors.push({ id: path, vec, metadata: { blocks: [], lastModified: 0 } });
+                }
+                return findNearestNeighbors(queryVec, vectors, limit, threshold).map((n) => ({
+                    path: n.id,
+                    similarity: n.similarity,
+                    blocks: n.metadata.blocks,
+                }));
             }
         }
         catch (error) {
@@ -154,6 +178,19 @@ export class SearchEngine {
      * words anywhere, instead of requiring the exact phrase as a literal
      * substring. Scores are normalized to 0-1 so `threshold` is meaningful.
      */
+    /**
+     * Built once per server run and reused; the on-disk cache makes a restart cheap.
+     */
+    async getSupplementalIndex() {
+        if (!this.supplementalPromise) {
+            this.supplementalPromise = buildSupplementalIndex(this.loader.getVaultPath(), new Set(this.loader.getSources().keys())).catch(() => ({
+                vectors: new Map(),
+                newlyEmbedded: 0,
+                missingFromPlugin: 0,
+            }));
+        }
+        return this.supplementalPromise;
+    }
     searchByKeyword(queryText, limit = 10, threshold = 0.4) {
         const terms = Array.from(new Set(queryText
             .toLowerCase()

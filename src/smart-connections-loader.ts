@@ -11,6 +11,8 @@ export class SmartConnectionsLoader {
   private smartEnvPath: string;
   private config: SmartEnvConfig | null = null;
   private sources: Map<string, SmartSource> = new Map();
+  private pluginIndexAvailable = false;
+  private initError: string | null = null;
 
   constructor(vaultPath: string) {
     this.vaultPath = vaultPath;
@@ -20,17 +22,40 @@ export class SmartConnectionsLoader {
   /**
    * Initialize and load all Smart Connections data
    */
+  /**
+   * Start up, with or without Smart Connections.
+   *
+   * This used to throw when `.smart-env` was missing, which killed the whole
+   * server and made the Obsidian plugin a hard prerequisite for any semantic
+   * search. `.smart-env` is gitignored so it never travels with the vault, which
+   * means every machine either builds its own index or has none, and "has none"
+   * was fatal. Since the server can embed notes itself now, the plugin is an
+   * optimisation: where it has run we use its per-block work, where it has not we
+   * start empty and the supplemental indexer covers the vault.
+   */
   async initialize(): Promise<void> {
-    // Check if .smart-env exists
     if (!fs.existsSync(this.smartEnvPath)) {
-      throw new Error(`Smart Connections directory not found at: ${this.smartEnvPath}`);
+      this.pluginIndexAvailable = false;
+      return;
     }
+    try {
+      await this.loadConfig();
+      await this.loadSources();
+      this.pluginIndexAvailable = this.sources.size > 0;
+    } catch (e) {
+      // A half-written or older-format .smart-env should degrade, not detonate.
+      this.pluginIndexAvailable = false;
+      this.initError = e instanceof Error ? e.message : String(e);
+    }
+  }
 
-    // Load configuration
-    await this.loadConfig();
+  /** False when Smart Connections has never indexed this vault on this machine. */
+  hasPluginIndex(): boolean {
+    return this.pluginIndexAvailable;
+  }
 
-    // Load all sources
-    await this.loadSources();
+  getInitError(): string | null {
+    return this.initError;
   }
 
   /**
@@ -129,8 +154,10 @@ export class SmartConnectionsLoader {
    * Get the embedding model key from config
    */
   getEmbeddingModelKey(): string {
+    // No plugin index means no config, which is a supported state now. Nothing
+    // reads stored vectors then, so the key is only a label.
     if (!this.config) {
-      throw new Error('Configuration not loaded');
+      return 'TaylorAI/bge-micro-v2';
     }
 
     // Extract the model key from the embed_model configuration
