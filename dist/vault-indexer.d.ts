@@ -39,9 +39,11 @@ export interface SupplementalIndex {
  * Embed every note the plugin has not indexed. `knownPaths` is what Smart
  * Connections already covers, which we never duplicate.
  *
- * `maxNotes` bounds a first run on a vault that has drifted badly, so the first
- * query after a long gap does not hang. Anything beyond the cap is embedded on
- * the next call, and the count is reported rather than hidden.
+ * `maxEmbeddings` bounds a first run on a vault that has drifted badly, so the
+ * first query after a long gap does not hang. It counts embed CALLS rather than
+ * notes, because each note also costs one call per heading section. Anything
+ * beyond the budget is embedded on the next call, and the shortfall shows up in
+ * `coverage.unsearchable` rather than being hidden.
  */
 /**
  * Split a note into heading-delimited sections small enough to embed whole.
@@ -55,5 +57,5 @@ export interface SupplementalIndex {
  * signal, and a bare section body often does not say what it is about.
  */
 export declare function splitIntoSections(relPath: string, text: string, maxChars?: number): string[];
-export declare function buildSupplementalIndex(vaultPath: string, knownPaths: Set<string>, maxNotes?: number): Promise<SupplementalIndex>;
+export declare function buildSupplementalIndex(vaultPath: string, knownPaths: Set<string>, maxEmbeddings?: number): Promise<SupplementalIndex>;
 //# sourceMappingURL=vault-indexer.d.ts.map

@@ -92,9 +92,11 @@ function saveCache(vaultPath, cache) {
  * Embed every note the plugin has not indexed. `knownPaths` is what Smart
  * Connections already covers, which we never duplicate.
  *
- * `maxNotes` bounds a first run on a vault that has drifted badly, so the first
- * query after a long gap does not hang. Anything beyond the cap is embedded on
- * the next call, and the count is reported rather than hidden.
+ * `maxEmbeddings` bounds a first run on a vault that has drifted badly, so the
+ * first query after a long gap does not hang. It counts embed CALLS rather than
+ * notes, because each note also costs one call per heading section. Anything
+ * beyond the budget is embedded on the next call, and the shortfall shows up in
+ * `coverage.unsearchable` rather than being hidden.
  */
 /**
  * Split a note into heading-delimited sections small enough to embed whole.
@@ -160,16 +162,24 @@ export function splitIntoSections(relPath, text, maxChars = 1100) {
     return sections;
 }
 export async function buildSupplementalIndex(vaultPath, knownPaths, 
-// High enough that a machine with no Smart Connections index at all covers a
-// whole vault in one pass. Measured at roughly 16ms per note, so 2000 notes is
-// about 30 seconds once, and never again thanks to the cache. The cap exists
-// only so an enormous vault cannot hang the first query forever.
-maxNotes = 2000) {
+// Budget in EMBED CALLS, not notes, because a note now costs one call for
+// itself plus one per heading section. Measured here at 10.6 sections per note,
+// so a per-note cap of 2000 quietly became roughly 21000 calls and the old
+// "about 30 seconds" promise became minutes. That cost lands on a member's very
+// first query, on the day-one path we are otherwise trying to keep fast.
+//
+// Partial indexing is safe now in a way it was not before: whatever this run
+// does not reach is reported through `coverage.unsearchable` and will flip the
+// health check to PARTLY BLIND, so a short index announces itself rather than
+// looking like a complete one. Work is cached per note, so successive runs pick
+// up where this one stopped and the vault converges over the first few queries.
+maxEmbeddings = 3000) {
     const cache = loadCache(vaultPath);
     const vectors = new Map();
     const sections = new Map();
     const missing = listMarkdown(vaultPath).filter((p) => !knownPaths.has(p));
     let newlyEmbedded = 0;
+    let embedCalls = 0;
     let cacheDirty = false;
     for (const rel of missing) {
         let st;
@@ -191,7 +201,7 @@ maxNotes = 2000) {
                 sections.set(rel, cached.sections);
             continue;
         }
-        if (newlyEmbedded >= maxNotes)
+        if (embedCalls >= maxEmbeddings)
             continue;
         let text;
         try {
@@ -209,14 +219,18 @@ maxNotes = 2000) {
         const vec = await embedText(`${rel}\n\n${text}`);
         if (!vec)
             break; // Model unavailable; leave the rest for a later run.
+        embedCalls++;
         // Sections are what make the body of a long note reachable; the whole-note
-        // vector above only ever represents its opening.
+        // vector above only ever represents its opening. A note is finished once
+        // started rather than half-sectioned, so the budget is checked per note and
+        // a note never lands in the cache with a partial section list.
         const sectionVecs = [];
         for (const section of splitIntoSections(rel, text)) {
             const sv = await embedText(section);
             if (!sv)
                 break;
             sectionVecs.push(sv);
+            embedCalls++;
         }
         vectors.set(rel, vec);
         if (sectionVecs.length)
