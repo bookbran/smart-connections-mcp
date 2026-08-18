@@ -148,7 +148,7 @@ export class SearchEngine {
                 // answer while the best one is invisible, so they are embedded here and
                 // searched alongside. See `vault-indexer`.
                 const supplemental = await this.getSupplementalIndex();
-                const results = this.rankHybrid(queryVec, supplemental, limit, threshold);
+                const results = this.rankFused(queryVec, queryText, supplemental, limit, threshold);
                 return this.buildResponse('semantic', results, threshold, supplemental);
             }
         }
@@ -176,7 +176,7 @@ export class SearchEngine {
      * Sections come from Smart Connections where the plugin has run, and from our
      * own indexer where it has not, so the two paths produce the same ranking.
      */
-    rankHybrid(queryVec, supplemental, limit, threshold) {
+    denseScores(queryVec, supplemental) {
         const best = new Map();
         const offer = (path, score, blocks) => {
             const prev = best.get(path);
@@ -217,11 +217,70 @@ export class SearchEngine {
             if (top > -1)
                 offer(path, top, []);
         }
-        return Array.from(best.entries())
-            .filter(([, v]) => v.score >= threshold)
-            .sort((a, b) => b[1].score - a[1].score)
+        return best;
+    }
+    /**
+     * Fuse dense and lexical rankings with Reciprocal Rank Fusion.
+     *
+     * Dense retrieval has a structural blind spot that no amount of better
+     * embedding fixes: short literal tokens. An error code, a date, a person's
+     * surname, a config flag, a commit SHA. Those carry almost no semantic signal,
+     * so a vector model has nothing to grip, while a lexical scorer finds them
+     * immediately. The 2026 retrieval literature is consistent that fusing the two
+     * is the single largest post-baseline improvement available, ahead of
+     * reranking and ahead of chunking strategy, because it closes a gap the other
+     * two cannot reach.
+     *
+     * RRF fuses by RANK rather than score, which is what makes it usable here:
+     * cosine similarity and a term-coverage score live on incompatible scales and
+     * any attempt to normalise them is a tuning exercise that goes stale. Summing
+     * 1/(k + rank) needs no normalisation and rewards notes both retrievers agree
+     * on. k=60 is the value from the original paper and the field default; it
+     * damps the top of each list so one retriever cannot dominate outright.
+     *
+     * The reported `similarity` stays the dense cosine, so existing thresholds and
+     * expectations still mean what they meant. `matchedVia` says which retriever
+     * actually found a result, because "this surfaced on a literal term match with
+     * near-zero semantic similarity" is something a caller should be able to see
+     * rather than infer from a confusing score.
+     */
+    rankFused(queryVec, queryText, supplemental, limit, threshold) {
+        const K = 60;
+        const dense = this.denseScores(queryVec, supplemental);
+        const denseRanked = Array.from(dense.entries()).sort((a, b) => b[1].score - a[1].score);
+        // Threshold 0 and a deep cut: fusion needs ranks, and a lexical hit that the
+        // dense side scores poorly is exactly the case this exists to rescue.
+        const lexical = this.searchByKeyword(queryText, 200, 0);
+        const rrf = new Map();
+        const seenDense = new Set();
+        const seenLexical = new Set();
+        denseRanked.forEach(([path], i) => {
+            rrf.set(path, (rrf.get(path) ?? 0) + 1 / (K + i + 1));
+            seenDense.add(path);
+        });
+        lexical.forEach((r, i) => {
+            rrf.set(r.path, (rrf.get(r.path) ?? 0) + 1 / (K + i + 1));
+            seenLexical.add(r.path);
+        });
+        // A note earns a place either by clearing the semantic threshold or by
+        // ranking near the top lexically. Without the second clause the threshold
+        // would filter out precisely the literal-token rescues fusion is for.
+        const lexicalRescue = new Set(lexical.slice(0, 20).map((r) => r.path));
+        return Array.from(rrf.entries())
+            .filter(([path]) => (dense.get(path)?.score ?? 0) >= threshold || lexicalRescue.has(path))
+            .sort((a, b) => b[1] - a[1])
             .slice(0, limit)
-            .map(([path, v]) => ({ path, similarity: v.score, blocks: v.blocks }));
+            .map(([path]) => {
+            const d = dense.get(path);
+            const inLex = seenLexical.has(path);
+            const semantic = (d?.score ?? 0) >= threshold;
+            return {
+                path,
+                similarity: d?.score ?? 0,
+                blocks: d?.blocks ?? [],
+                matchedVia: semantic && inLex ? 'both' : inLex && !semantic ? 'lexical' : 'semantic',
+            };
+        });
     }
     /** Vector dataset from the notes Smart Connections has already embedded. */
     pluginVectors() {

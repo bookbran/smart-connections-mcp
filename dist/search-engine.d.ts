@@ -52,7 +52,33 @@ export declare class SearchEngine {
      * Sections come from Smart Connections where the plugin has run, and from our
      * own indexer where it has not, so the two paths produce the same ranking.
      */
-    private rankHybrid;
+    private denseScores;
+    /**
+     * Fuse dense and lexical rankings with Reciprocal Rank Fusion.
+     *
+     * Dense retrieval has a structural blind spot that no amount of better
+     * embedding fixes: short literal tokens. An error code, a date, a person's
+     * surname, a config flag, a commit SHA. Those carry almost no semantic signal,
+     * so a vector model has nothing to grip, while a lexical scorer finds them
+     * immediately. The 2026 retrieval literature is consistent that fusing the two
+     * is the single largest post-baseline improvement available, ahead of
+     * reranking and ahead of chunking strategy, because it closes a gap the other
+     * two cannot reach.
+     *
+     * RRF fuses by RANK rather than score, which is what makes it usable here:
+     * cosine similarity and a term-coverage score live on incompatible scales and
+     * any attempt to normalise them is a tuning exercise that goes stale. Summing
+     * 1/(k + rank) needs no normalisation and rewards notes both retrievers agree
+     * on. k=60 is the value from the original paper and the field default; it
+     * damps the top of each list so one retriever cannot dominate outright.
+     *
+     * The reported `similarity` stays the dense cosine, so existing thresholds and
+     * expectations still mean what they meant. `matchedVia` says which retriever
+     * actually found a result, because "this surfaced on a literal term match with
+     * near-zero semantic similarity" is something a caller should be able to see
+     * rather than infer from a confusing score.
+     */
+    private rankFused;
     /** Vector dataset from the notes Smart Connections has already embedded. */
     private pluginVectors;
     /**

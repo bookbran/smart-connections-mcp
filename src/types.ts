@@ -60,6 +60,12 @@ export interface SimilarNote {
   similarity: number;
   blocks?: string[];
   matchedContent?: string;
+  /**
+   * Which retriever surfaced this. `lexical` means the dense score was below
+   * threshold and a literal term match rescued it, which is the case fusion
+   * exists for and the one a caller most needs to be able to see.
+   */
+  matchedVia?: 'semantic' | 'lexical' | 'both';
 }
 
 export interface ConnectionNode {
