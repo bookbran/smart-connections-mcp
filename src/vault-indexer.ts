@@ -63,7 +63,7 @@ export interface SupplementalIndex {
   missingFromPlugin: number;
 }
 
-function listMarkdown(root: string, dir = root, out: string[] = []): string[] {
+export function listMarkdown(root: string, dir = root, out: string[] = []): string[] {
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });

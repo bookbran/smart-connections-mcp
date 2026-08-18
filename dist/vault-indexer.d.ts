@@ -35,6 +35,7 @@ export interface SupplementalIndex {
     /** Notes on disk that Smart Connections has never seen. */
     missingFromPlugin: number;
 }
+export declare function listMarkdown(root: string, dir?: string, out?: string[]): string[];
 /**
  * Embed every note the plugin has not indexed. `knownPaths` is what Smart
  * Connections already covers, which we never duplicate.

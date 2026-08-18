@@ -17,6 +17,7 @@ import {
 import { z } from 'zod';
 import { SmartConnectionsLoader } from './smart-connections-loader.js';
 import { SearchEngine } from './search-engine.js';
+import { buildLinkGraph, resolveLink, integrityReport, type LinkGraph } from './link-graph.js';
 
 // Environment variable for vault path
 const VAULT_PATH = process.env.SMART_VAULT_PATH;
@@ -34,6 +35,15 @@ await loader.initialize();
 
 // Create search engine after loader is initialized
 const searchEngine = new SearchEngine(loader);
+
+// Built on first use rather than at boot: it is a full vault read, and a session
+// that never asks a link question should not pay for it. Cached for the process
+// lifetime, same as the supplemental embedding index.
+let linkGraph: LinkGraph | null = null;
+function getLinkGraph(): LinkGraph {
+  if (!linkGraph) linkGraph = buildLinkGraph(VAULT_PATH!);
+  return linkGraph;
+}
 
 console.error('Smart Connections MCP Server initialized successfully');
 console.error(`Vault: ${VAULT_PATH}`);
@@ -84,6 +94,19 @@ const GetNoteContentSchema = z.object({
 });
 
 const GetStatsSchema = z.object({});
+
+const ResolveLinkSchema = z.object({
+  link: z.string(),
+});
+
+const GetBacklinksSchema = z.object({
+  note_path: z.string(),
+  include_outbound: z.boolean().optional(),
+});
+
+const CheckVaultIntegritySchema = z.object({
+  min_references: z.number().min(1).optional(),
+});
 
 const CheckSearchHealthSchema = z.object({
   canary_path: z.string().optional(),
@@ -176,6 +199,39 @@ const tools: Tool[] = [
         },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'resolve_link',
+    description: 'Turn a wikilink into a real file path, the way Obsidian would. Accepts bare text ("Throughline"), full link syntax ("[[Throughline|the CRM tracker]]"), or a path, and honors `aliases:` frontmatter, so a tracker filed as 2026-06-23-throughline-workstream.md resolves from its codename. Use this whenever you read a [[link]] in a note and need the actual file, instead of guessing at the filename or falling back to semantic search, which finds notes that are SIMILAR rather than the one that was actually referenced. Returns null when nothing resolves, which means the note genuinely does not exist in this vault.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        link: { type: 'string', description: 'Wikilink text, with or without the surrounding brackets.' },
+      },
+      required: ['link'],
+    },
+  },
+  {
+    name: 'get_backlinks',
+    description: 'Which notes explicitly link TO this one. This answers a different question from semantic search: backlinks are edges the author wrote by hand, so they show what the vault has decided this note is load-bearing for, regardless of whether the prose is similar. Use it to judge how important a note is, to find every place a decision is cited before changing it, and to trace how a concept actually gets used. Set include_outbound to also get what this note links to.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        note_path: { type: 'string', description: 'Vault-relative path, e.g. context/revenue-engine.md' },
+        include_outbound: { type: 'boolean', description: 'Also return the notes this one links to. Default false.' },
+      },
+      required: ['note_path'],
+    },
+  },
+  {
+    name: 'check_vault_integrity',
+    description: 'Find wikilinks that point at notes which do not exist. Git proves two machines agree on what is COMMITTED; it is silent about a note written outside the vault folder or written on another machine and never committed, and both fail the same silent way, as a link that resolves to nothing. Results are ranked by how many DISTINCT notes reference each missing target, because one note pointing at an unwritten note is an ordinary forward reference while six pointing at the same target means the vault treats it as real and it is either a concept that never got a home note or a note this machine cannot see. Run at session start alongside check_search_health.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        min_references: { type: 'number', description: 'How many distinct referencing notes before a missing target counts as load-bearing. Default 3.', minimum: 1 },
+      },
     },
   },
   {
@@ -293,6 +349,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: JSON.stringify(response, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'resolve_link': {
+        const { link } = ResolveLinkSchema.parse(args);
+        const graph = getLinkGraph();
+        const hit = resolveLink(graph, link);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                hit
+                  ? { resolved: true, ...hit }
+                  : {
+                      resolved: false,
+                      link,
+                      note: 'No note in this vault answers to that name, path, or alias. Treat it as a missing note, not a missing answer: it may have been written outside the vault folder or on another machine. check_vault_integrity shows how many notes reference it.',
+                    },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      case 'get_backlinks': {
+        const { note_path, include_outbound } = GetBacklinksSchema.parse(args);
+        const graph = getLinkGraph();
+        const inbound = [...(graph.backlinks.get(note_path) || [])].sort();
+        const payload: Record<string, unknown> = {
+          note_path,
+          backlinks: inbound,
+          backlinkCount: inbound.length,
+        };
+        if (include_outbound) {
+          payload.linksTo = [...(graph.edges.get(note_path) || [])].sort();
+        }
+        if (!graph.index.has(note_path.toLowerCase())) {
+          payload.warning =
+            'That path is not a note in this vault, so an empty result here says nothing about the note you meant. Resolve the name with resolve_link first.';
+        }
+        return {
+          content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+        };
+      }
+
+      case 'check_vault_integrity': {
+        const { min_references } = CheckVaultIntegritySchema.parse(args);
+        const graph = getLinkGraph();
+        const report = integrityReport(graph, min_references ?? 3);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  noteCount: report.noteCount,
+                  unresolvedCount: report.unresolvedCount,
+                  loadBearing: report.loadBearing,
+                  note: 'loadBearing is the signal. Each entry is a concept the vault never gave a home note, or a note that exists only on another machine. This check sees only THIS machine, so it cannot speak for uncommitted work elsewhere.',
+                },
+                null,
+                2
+              ),
             },
           ],
         };

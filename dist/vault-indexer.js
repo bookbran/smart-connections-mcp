@@ -39,7 +39,7 @@ const SKIP_DIRS = new Set([
     'node_modules',
     '.stfolder',
 ]);
-function listMarkdown(root, dir = root, out = []) {
+export function listMarkdown(root, dir = root, out = []) {
     let entries;
     try {
         entries = readdirSync(dir, { withFileTypes: true });
