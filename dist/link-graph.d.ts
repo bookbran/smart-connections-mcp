@@ -22,6 +22,13 @@
  * switched off. (Observed 2026-08-18 on a first pass that flagged every
  * firstmate tracker codename as missing.)
  */
+export interface HygieneReport {
+    /** Reachable from nothing and pointing at nothing. Findable only by search. */
+    orphans: string[];
+    /** No YAML frontmatter block, which the Kit treats as a mandatory convention. */
+    missingFrontmatter: string[];
+    noteCount: number;
+}
 export interface LinkGraph {
     /** Every lowercased spelling that resolves to a note, mapped to its path. */
     index: Map<string, string>;
@@ -31,6 +38,8 @@ export interface LinkGraph {
     backlinks: Map<string, Set<string>>;
     /** raw link text that resolves to nothing -> the notes that reference it */
     unresolved: Map<string, Set<string>>;
+    /** Notes with no `---` frontmatter block. */
+    noFrontmatter: Set<string>;
     noteCount: number;
 }
 export declare function buildLinkGraph(vaultPath: string): LinkGraph;
@@ -67,4 +76,19 @@ export declare function integrityReport(graph: LinkGraph, minRefs?: number): {
         referencedBy: string[];
     }[];
 };
+/**
+ * Structural hygiene, from data the link scan already produced.
+ *
+ * ORPHANS are notes nothing links to and which link to nothing. They are not
+ * broken, and search still finds them, but they sit outside the graph entirely:
+ * nobody navigating the vault will ever arrive at one, and nothing will remind
+ * the member they exist. On a vault that has been running a while these are
+ * usually captures that never got filed.
+ *
+ * MISSING FRONTMATTER matters because the Kit makes it a mandatory convention
+ * even when the Obsidian app is optional: it is what search embeds first, what
+ * the dashboard reads for `type:`, and where `aliases:` lives. Nothing verified
+ * it until now, which is how a mandatory convention becomes an aspiration.
+ */
+export declare function hygieneReport(graph: LinkGraph): HygieneReport;
 //# sourceMappingURL=link-graph.d.ts.map

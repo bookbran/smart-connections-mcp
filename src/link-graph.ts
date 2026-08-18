@@ -27,6 +27,14 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { listMarkdown } from './vault-indexer.js';
 
+export interface HygieneReport {
+  /** Reachable from nothing and pointing at nothing. Findable only by search. */
+  orphans: string[];
+  /** No YAML frontmatter block, which the Kit treats as a mandatory convention. */
+  missingFrontmatter: string[];
+  noteCount: number;
+}
+
 export interface LinkGraph {
   /** Every lowercased spelling that resolves to a note, mapped to its path. */
   index: Map<string, string>;
@@ -36,6 +44,8 @@ export interface LinkGraph {
   backlinks: Map<string, Set<string>>;
   /** raw link text that resolves to nothing -> the notes that reference it */
   unresolved: Map<string, Set<string>>;
+  /** Notes with no `---` frontmatter block. */
+  noFrontmatter: Set<string>;
   noteCount: number;
 }
 
@@ -116,9 +126,11 @@ export function buildLinkGraph(vaultPath: string): LinkGraph {
   const edges = new Map<string, Set<string>>();
   const backlinks = new Map<string, Set<string>>();
   const unresolved = new Map<string, Set<string>>();
+  const noFrontmatter = new Set<string>();
 
   for (const rel of rels) {
     const text = bodies.get(rel) || '';
+    if (!text.startsWith('---') || text.indexOf('\n---', 3) < 0) noFrontmatter.add(rel);
     const stripped = text.replace(CODE, '');
     for (const m of stripped.matchAll(LINK)) {
       const raw = m[1].trim();
@@ -139,7 +151,7 @@ export function buildLinkGraph(vaultPath: string): LinkGraph {
     }
   }
 
-  return { index, edges, backlinks, unresolved, noteCount: rels.length };
+  return { index, edges, backlinks, unresolved, noFrontmatter, noteCount: rels.length };
 }
 
 /**
@@ -185,5 +197,39 @@ export function integrityReport(graph: LinkGraph, minRefs = 3) {
     unresolvedCount: all.length,
     loadBearing: all.filter((u) => u.referencedBy.length >= minRefs),
     all,
+  };
+}
+
+/**
+ * Structural hygiene, from data the link scan already produced.
+ *
+ * ORPHANS are notes nothing links to and which link to nothing. They are not
+ * broken, and search still finds them, but they sit outside the graph entirely:
+ * nobody navigating the vault will ever arrive at one, and nothing will remind
+ * the member they exist. On a vault that has been running a while these are
+ * usually captures that never got filed.
+ *
+ * MISSING FRONTMATTER matters because the Kit makes it a mandatory convention
+ * even when the Obsidian app is optional: it is what search embeds first, what
+ * the dashboard reads for `type:`, and where `aliases:` lives. Nothing verified
+ * it until now, which is how a mandatory convention becomes an aspiration.
+ */
+export function hygieneReport(graph: LinkGraph): HygieneReport {
+  // Directories that hold tooling and templates rather than thinking. A
+  // SKILL.md linking to nothing is correct, not orphaned, and counting it makes
+  // the number large enough that a member stops reading the report.
+  const NOT_KNOWLEDGE = /^(claude-skills|cursor-skills|canvases|resources\/templates|node_modules)\//;
+
+  const orphans: string[] = [];
+  for (const path of new Set(graph.index.values())) {
+    if (NOT_KNOWLEDGE.test(path)) continue;
+    const inbound = graph.backlinks.get(path)?.size ?? 0;
+    const outbound = graph.edges.get(path)?.size ?? 0;
+    if (inbound === 0 && outbound === 0) orphans.push(path);
+  }
+  return {
+    orphans: orphans.sort(),
+    missingFrontmatter: [...graph.noFrontmatter].sort(),
+    noteCount: graph.noteCount,
   };
 }

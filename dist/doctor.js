@@ -19,7 +19,7 @@
  *   npm run doctor -- /path/to/vault --json
  */
 import { execFileSync } from 'child_process';
-import { buildLinkGraph, integrityReport } from './link-graph.js';
+import { buildLinkGraph, integrityReport, hygieneReport } from './link-graph.js';
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const json = process.argv.includes('--json');
 const vaultPath = args[0] || process.env.SMART_VAULT_PATH;
@@ -59,9 +59,10 @@ function gitState(cwd) {
 }
 const graph = buildLinkGraph(vaultPath);
 const report = integrityReport(graph);
+const hygiene = hygieneReport(graph);
 const git = gitState(vaultPath);
 if (json) {
-    console.log(JSON.stringify({ vaultPath, git, ...report }, null, 2));
+    console.log(JSON.stringify({ vaultPath, git, ...report, hygiene }, null, 2));
     process.exit(0);
 }
 console.log(`\nVault: ${vaultPath}`);
@@ -102,6 +103,29 @@ else {
         '  note, a note written outside the vault folder, or a note that exists only\n' +
         '  on another machine. The first is common and worth fixing; the other two\n' +
         '  mean a brain is not whole.');
+}
+console.log('\nStructural hygiene (tidiness, not breakage)');
+console.log(`  ${hygiene.orphans.length} orphan note(s): nothing links to them, they link to nothing.`);
+if (hygiene.orphans.length) {
+    console.log('  Search still finds these; nobody navigating the vault arrives at one.');
+    console.log('  Usually captures that never got filed. Tooling directories are excluded.');
+    for (const o of hygiene.orphans.slice(0, 8))
+        console.log(`   - ${o}`);
+    if (hygiene.orphans.length > 8)
+        console.log(`   ... and ${hygiene.orphans.length - 8} more`);
+}
+const fmPct = Math.round((100 * hygiene.missingFrontmatter.length) / Math.max(1, report.noteCount));
+console.log(`  ${hygiene.missingFrontmatter.length} of ${report.noteCount} notes (${fmPct}%) have no frontmatter.`);
+if (fmPct > 50) {
+    console.log('  That is most of the vault, so this is a posture question rather than a');
+    console.log('  defect list: either frontmatter is a convention this vault never adopted,');
+    console.log('  or it is being treated as mandatory somewhere it should not be. Deciding');
+    console.log('  that is worth more than fixing 500 files. Where it DOES matter today:');
+    console.log('  `aliases:` is the only way a note is reachable by a short codename.');
+}
+else if (hygiene.missingFrontmatter.length) {
+    for (const f of hygiene.missingFrontmatter.slice(0, 5))
+        console.log(`   - ${f}`);
 }
 console.log('\nLimit worth stating: this sees THIS machine and its remote. Uncommitted work\n' +
     'or an out-of-directory vault on another computer is invisible from here, so\n' +
