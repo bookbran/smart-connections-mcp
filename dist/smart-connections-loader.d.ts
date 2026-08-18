@@ -7,6 +7,7 @@ export declare class SmartConnectionsLoader {
     private smartEnvPath;
     private config;
     private sources;
+    private blocks;
     private pluginIndexAvailable;
     private initError;
     constructor(vaultPath: string);
@@ -39,6 +40,11 @@ export declare class SmartConnectionsLoader {
     /**
      * Get all sources
      */
+    /** Per-section embeddings from the plugin, keyed by note path. */
+    getBlockVectors(): Map<string, Array<{
+        heading: string;
+        vec: number[];
+    }>>;
     getSources(): Map<string, SmartSource>;
     /**
      * Get a specific source by path

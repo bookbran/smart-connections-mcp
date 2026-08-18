@@ -1,7 +1,7 @@
 /**
  * Semantic search engine for Smart Connections
  */
-import { findNearestNeighbors } from './embedding-utils.js';
+import { cosineSimilarity, findNearestNeighbors } from './embedding-utils.js';
 import { embedText } from './embedder.js';
 import { buildSupplementalIndex } from './vault-indexer.js';
 function escapeRegExp(str) {
@@ -148,15 +148,7 @@ export class SearchEngine {
                 // answer while the best one is invisible, so they are embedded here and
                 // searched alongside. See `vault-indexer`.
                 const supplemental = await this.getSupplementalIndex();
-                const vectors = this.pluginVectors();
-                for (const [path, vec] of supplemental.vectors) {
-                    vectors.push({ id: path, vec, metadata: { blocks: [], lastModified: 0 } });
-                }
-                const results = findNearestNeighbors(queryVec, vectors, limit, threshold).map((n) => ({
-                    path: n.id,
-                    similarity: n.similarity,
-                    blocks: n.metadata.blocks,
-                }));
+                const results = this.rankHybrid(queryVec, supplemental, limit, threshold);
                 return this.buildResponse('semantic', results, threshold, supplemental);
             }
         }
@@ -165,6 +157,71 @@ export class SearchEngine {
         }
         const results = this.searchByKeyword(queryText, limit, threshold);
         return this.buildResponse('keyword', results, threshold, null);
+    }
+    /**
+     * Score every note by the best evidence available for it: its whole-note
+     * vector, or its closest individual section, whichever matches the query more.
+     *
+     * Note vectors are truncated to the embedding model's window, so on a vault of
+     * ordinary multi-thousand-character notes they represent the opening and
+     * nothing after it. Sections are what make the rest reachable. Measured on
+     * Dan's 630-note vault, retrieving a note from a passage of its own body:
+     * recall@1 15% on note vectors, 57% on sections, and the hybrid matched
+     * sections while keeping the note vector's small edge on short title-shaped
+     * queries. Taking the max rather than averaging is deliberate: one strongly
+     * relevant section is a reason to return a note, and averaging it against
+     * unrelated sections in the same note would bury exactly the long, wide-ranging
+     * notes that need this most.
+     *
+     * Sections come from Smart Connections where the plugin has run, and from our
+     * own indexer where it has not, so the two paths produce the same ranking.
+     */
+    rankHybrid(queryVec, supplemental, limit, threshold) {
+        const best = new Map();
+        const offer = (path, score, blocks) => {
+            const prev = best.get(path);
+            if (!prev || score > prev.score)
+                best.set(path, { score, blocks });
+            else if (prev && blocks.length && !prev.blocks.length)
+                prev.blocks = blocks;
+        };
+        for (const item of this.pluginVectors()) {
+            offer(item.id, cosineSimilarity(queryVec, item.vec), item.metadata.blocks);
+        }
+        for (const [path, vec] of supplemental.vectors) {
+            offer(path, cosineSimilarity(queryVec, vec), []);
+        }
+        const pluginBlocks = this.loader.getBlockVectors();
+        for (const [path, blocks] of pluginBlocks) {
+            const headings = [];
+            let top = -1;
+            for (const b of blocks) {
+                const score = cosineSimilarity(queryVec, b.vec);
+                if (score > top) {
+                    top = score;
+                    headings.length = 0;
+                    if (b.heading)
+                        headings.push(b.heading);
+                }
+            }
+            if (top > -1)
+                offer(path, top, headings);
+        }
+        for (const [path, vecs] of supplemental.sections) {
+            let top = -1;
+            for (const vec of vecs) {
+                const score = cosineSimilarity(queryVec, vec);
+                if (score > top)
+                    top = score;
+            }
+            if (top > -1)
+                offer(path, top, []);
+        }
+        return Array.from(best.entries())
+            .filter(([, v]) => v.score >= threshold)
+            .sort((a, b) => b[1].score - a[1].score)
+            .slice(0, limit)
+            .map(([path, v]) => ({ path, similarity: v.score, blocks: v.blocks }));
     }
     /** Vector dataset from the notes Smart Connections has already embedded. */
     pluginVectors() {
@@ -197,6 +254,15 @@ export class SearchEngine {
     buildCoverage(mode, supplemental) {
         const fromPlugin = mode === 'semantic' ? this.pluginVectors().length : this.loader.getSources().size;
         const supplementalCount = supplemental ? supplemental.vectors.size : 0;
+        // Sections are the reason a long note is findable at all, so report them
+        // rather than letting "630 of 630 searched" hide a vault with no chunking.
+        let sectionCount = 0;
+        for (const list of this.loader.getBlockVectors().values())
+            sectionCount += list.length;
+        if (supplemental) {
+            for (const list of supplemental.sections.values())
+                sectionCount += list.length;
+        }
         const searched = fromPlugin + supplementalCount;
         // Notes the plugin has never seen still exist on disk. Counting them keeps
         // `vaultTotal` the size of the real vault rather than the size of the index.
@@ -206,6 +272,7 @@ export class SearchEngine {
             vaultTotal,
             fromPlugin,
             supplemental: supplementalCount,
+            sections: sectionCount,
             unsearchable: Math.max(0, vaultTotal - searched),
         };
     }
@@ -242,7 +309,8 @@ export class SearchEngine {
      * `canaryPath` pins a specific note when the kit ships one.
      */
     async checkSearchHealth(canaryPath) {
-        const probeTargets = this.pickProbeTargets(canaryPath);
+        const supplementalForProbes = await this.getSupplementalIndex();
+        const probeTargets = this.pickProbeTargets(supplementalForProbes, canaryPath);
         const probes = [];
         let mode = 'semantic';
         let coverage = this.buildCoverage('semantic', await this.getSupplementalIndex());
@@ -262,8 +330,21 @@ export class SearchEngine {
             });
         }
         const probesPassed = probes.filter((p) => p.found).length;
-        // One miss is a ranking accident; a clean sweep of misses is blindness.
-        const alive = probes.length > 0 && probesPassed > 0 && mode === 'semantic';
+        // Three conditions, because there are three ways to be untrustworthy and
+        // only one of them is "retrieval is completely dead".
+        //   - a clean sweep of probe misses is blindness (one miss is a ranking
+        //     accident, so require a majority rather than a single hit)
+        //   - keyword mode means the embedding model never loaded
+        //   - and a large unsearchable slice means an empty result proves nothing,
+        //     even though the notes it CAN see come back fine. That last case is the
+        //     one that nearly slipped through: with most of the vault missing, the
+        //     probes that happened to land on indexed notes still passed.
+        const majority = Math.ceil(probes.length / 2);
+        const coverageGap = coverage.vaultTotal > 0 ? coverage.unsearchable / coverage.vaultTotal : 0;
+        const alive = probes.length > 0 &&
+            probesPassed >= majority &&
+            mode === 'semantic' &&
+            coverageGap <= 0.1;
         return {
             alive,
             mode,
@@ -279,8 +360,13 @@ export class SearchEngine {
      * Query a note by its own title. If retrieval cannot find a note when handed
      * that note's title, it cannot find anything.
      */
-    pickProbeTargets(canaryPath) {
-        const paths = Array.from(this.loader.getSources().keys());
+    pickProbeTargets(supplemental, canaryPath) {
+        // Every note the engine can actually rank, not only the ones Smart
+        // Connections knows about. Sampling the plugin alone made the canary report
+        // "no notes are indexed" on a working plugin-free vault, which is a false
+        // alarm, and a check that cries wolf gets ignored exactly like one that
+        // stays silent when it should not.
+        const paths = Array.from(new Set([...this.loader.getSources().keys(), ...supplemental.vectors.keys()]));
         if (paths.length === 0)
             return [];
         const chosen = [];
@@ -313,6 +399,7 @@ export class SearchEngine {
         if (!this.supplementalPromise) {
             this.supplementalPromise = buildSupplementalIndex(this.loader.getVaultPath(), new Set(this.loader.getSources().keys())).catch(() => ({
                 vectors: new Map(),
+                sections: new Map(),
                 newlyEmbedded: 0,
                 missingFromPlugin: 0,
             }));
@@ -416,6 +503,11 @@ function buildVerdict(alive, mode, coverage, passed, run) {
             'Fix the model before trusting any "the vault has nothing on this" answer.');
     }
     if (!alive) {
+        if (coverage.unsearchable > 0 && passed > 0) {
+            return (`SEARCH IS PARTLY BLIND: only ${coverage.searched} of ${coverage.vaultTotal} notes ` +
+                'can be searched, so the notes it does find are real but an empty result proves ' +
+                'nothing. Do not report "the vault has nothing on this" until the index is complete.');
+        }
         return (`SEARCH IS BLIND: ${run} notes were asked for by their own titles and ${run - passed} ` +
             'did not come back. An empty result from this server cannot currently be trusted.');
     }

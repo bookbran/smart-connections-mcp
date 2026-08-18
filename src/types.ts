@@ -105,6 +105,12 @@ export interface SearchCoverage {
   fromPlugin: number;
   /** Of `searched`, how many this server embedded itself because the plugin had not. */
   supplemental: number;
+  /**
+   * Heading-level sections searched alongside whole notes. Zero means every note
+   * is represented only by its truncated opening, which is the state that made
+   * most of a long note unfindable.
+   */
+  sections: number;
   /** Notes we know exist but could not search this run. */
   unsearchable: number;
 }

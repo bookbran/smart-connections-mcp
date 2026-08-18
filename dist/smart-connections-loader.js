@@ -8,6 +8,7 @@ export class SmartConnectionsLoader {
     smartEnvPath;
     config = null;
     sources = new Map();
+    blocks = new Map();
     pluginIndexAvailable = false;
     initError = null;
     constructor(vaultPath) {
@@ -66,6 +67,9 @@ export class SmartConnectionsLoader {
      * Load all .ajson files from the multi directory
      */
     async loadSources() {
+        // Resolved once: loadConfig() has already run, and doing this per line would
+        // re-read the config thousands of times on a vault of any size.
+        const modelKey = this.getEmbeddingModelKey();
         const multiPath = path.join(this.smartEnvPath, 'multi');
         if (!fs.existsSync(multiPath)) {
             throw new Error(`Multi directory not found at: ${multiPath}`);
@@ -90,13 +94,39 @@ export class SmartConnectionsLoader {
                         const obj = JSON.parse(`{${cleanedLine}}`);
                         // Process all key-value pairs in the object
                         for (const key of Object.keys(obj)) {
-                            // Only process smart_sources entries (not smart_blocks)
                             if (key.startsWith('smart_sources:')) {
                                 const sourceData = obj[key];
                                 // Skip entries with null/undefined paths
                                 if (sourceData && sourceData.path) {
                                     this.sources.set(sourceData.path, sourceData);
                                 }
+                            }
+                            else if (key.startsWith('smart_blocks:')) {
+                                // Smart Connections embeds every heading-delimited section as
+                                // well as the whole note, and these were being dropped on the
+                                // floor. They are the reason the plugin exists: a note vector is
+                                // truncated to the model's window, so on a vault of ordinary
+                                // 5k-character notes it represents the opening and nothing else.
+                                // Block vectors are what make the body of a long note findable.
+                                const blockData = obj[key];
+                                const vec = blockData?.embeddings?.[modelKey]?.vec;
+                                if (!vec || !vec.length)
+                                    continue;
+                                // Block keys look like `smart_blocks:path/to/note.md#H1#H2`, and
+                                // the entry's own `path` field is null, so the note path has to
+                                // come from the key.
+                                const raw = key.slice('smart_blocks:'.length);
+                                const hashAt = raw.indexOf('#');
+                                const notePath = hashAt >= 0 ? raw.slice(0, hashAt) : raw;
+                                const heading = hashAt >= 0 ? raw.slice(hashAt + 1) : '';
+                                if (!notePath)
+                                    continue;
+                                let list = this.blocks.get(notePath);
+                                if (!list) {
+                                    list = [];
+                                    this.blocks.set(notePath, list);
+                                }
+                                list.push({ heading, vec });
                             }
                         }
                     }
@@ -110,11 +140,18 @@ export class SmartConnectionsLoader {
                 console.error(`Error loading ${file}:`, error);
             }
         }
-        console.error(`Loaded ${this.sources.size} sources successfully`);
+        let blockCount = 0;
+        for (const list of this.blocks.values())
+            blockCount += list.length;
+        console.error(`Loaded ${this.sources.size} sources and ${blockCount} block embeddings successfully`);
     }
     /**
      * Get all sources
      */
+    /** Per-section embeddings from the plugin, keyed by note path. */
+    getBlockVectors() {
+        return this.blocks;
+    }
     getSources() {
         return this.sources;
     }
