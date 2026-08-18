@@ -84,3 +84,59 @@ export interface NoteContent {
   content: string;
   blocks: string[];
 }
+
+/** Which engine actually answered a search. */
+export type SearchMode = 'semantic' | 'keyword';
+
+/**
+ * How much of the vault a given search could actually see.
+ *
+ * A retrieval tool that returns an empty list when it is blind is worse than
+ * one that throws, because empty looks like an answer. Every search response
+ * carries this so "nothing matched" and "nothing was searched" stop being
+ * indistinguishable.
+ */
+export interface SearchCoverage {
+  /** Notes the query was compared against. */
+  searched: number;
+  /** Notes we know exist: the plugin's index plus anything found on disk. */
+  vaultTotal: number;
+  /** Of `searched`, how many came from the Smart Connections plugin index. */
+  fromPlugin: number;
+  /** Of `searched`, how many this server embedded itself because the plugin had not. */
+  supplemental: number;
+  /** Notes we know exist but could not search this run. */
+  unsearchable: number;
+}
+
+export interface SearchResponse {
+  mode: SearchMode;
+  results: SimilarNote[];
+  coverage: SearchCoverage;
+  threshold: number;
+  /** Present only when the answer should not be read at face value. */
+  warning?: string;
+}
+
+/** One positive-control probe: ask for a note we know is there. */
+export interface SearchHealthProbe {
+  query: string;
+  expectedPath: string;
+  found: boolean;
+  /** 1-based position in the results, or null when it never came back. */
+  rank: number | null;
+  similarity: number | null;
+}
+
+export interface SearchHealthReport {
+  /** False means treat every empty result from this server as untrustworthy. */
+  alive: boolean;
+  mode: SearchMode;
+  coverage: SearchCoverage;
+  modelKey: string;
+  probes: SearchHealthProbe[];
+  probesPassed: number;
+  probesRun: number;
+  /** Plain-language answer, written to be read aloud at session start. */
+  verdict: string;
+}

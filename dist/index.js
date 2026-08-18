@@ -63,6 +63,9 @@ const GetNoteContentSchema = z.object({
     include_blocks: z.array(z.string()).optional().describe('Specific block headings to include'),
 });
 const GetStatsSchema = z.object({});
+const CheckSearchHealthSchema = z.object({
+    canary_path: z.string().optional(),
+});
 // Define available tools
 const tools = [
     {
@@ -127,7 +130,7 @@ const tools = [
     },
     {
         name: 'search_notes',
-        description: 'Semantic search: embeds the text query with the same model used for the note embeddings (bge-micro-v2) and returns notes ranked by cosine similarity. Falls back to multi-term keyword search if the embedding model is unavailable. Typical relevant matches score ~0.4-0.75; lower the threshold to widen recall.',
+        description: 'Semantic search over the vault. Returns an envelope, not a bare array: `mode` names the engine that answered ("semantic" is real, "keyword" means the embedding model failed to load and results will miss anything phrased differently), `coverage` says how many notes were actually searched out of the vault total, `results` holds the matches, and `warning` appears whenever the answer should not be read at face value. An empty `results` with mode "semantic" and full coverage means the vault really has nothing closer; an empty `results` with mode "keyword" or nonzero `coverage.unsearchable` means the tool was partly blind and you must not report it as an absence. Typical relevant matches score ~0.4-0.75; lower the threshold to widen recall.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -150,6 +153,19 @@ const tools = [
                 },
             },
             required: ['query'],
+        },
+    },
+    {
+        name: 'check_search_health',
+        description: 'Positive control for retrieval. Asks the index for notes that are known to be there, by their own titles, and reports whether they come back. Use this at session start, before trusting any empty search result, and any time a vault has been quiet or moved between machines. Returns `alive` (false means every empty result from this server is untrustworthy), `verdict` (a plain-language line written to be read aloud), `mode`, `coverage`, and the individual probes. A retrieval tool that can return nothing must be able to prove it can still see.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                canary_path: {
+                    type: 'string',
+                    description: 'Optional vault-relative path to a known note to probe for specifically, in addition to the automatic sample.',
+                },
+            },
         },
     },
     {
@@ -243,12 +259,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
             case 'search_notes': {
                 const { query, limit, threshold } = SearchNotesSchema.parse(args);
-                const results = await searchEngine.searchByQuery(query, limit, threshold);
+                const response = await searchEngine.searchByQuery(query, limit, threshold);
                 return {
                     content: [
                         {
                             type: 'text',
-                            text: JSON.stringify(results, null, 2),
+                            text: JSON.stringify(response, null, 2),
+                        },
+                    ],
+                };
+            }
+            case 'check_search_health': {
+                const { canary_path } = CheckSearchHealthSchema.parse(args);
+                const report = await searchEngine.checkSearchHealth(canary_path);
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify(report, null, 2),
                         },
                     ],
                 };

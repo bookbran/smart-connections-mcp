@@ -1,7 +1,7 @@
 /**
  * Semantic search engine for Smart Connections
  */
-import type { SimilarNote, ConnectionGraph, NoteContent } from './types.js';
+import type { SimilarNote, ConnectionGraph, NoteContent, SearchResponse, SearchHealthReport } from './types.js';
 import type { SmartConnectionsLoader } from './smart-connections-loader.js';
 export declare class SearchEngine {
     private loader;
@@ -25,10 +25,48 @@ export declare class SearchEngine {
      *
      * Embeds the query with the same model used for the stored note embeddings
      * (bge-micro-v2) and ranks notes by cosine similarity. If the embedding model
-     * can't be loaded (e.g. offline with no cached model), falls back to a
+     * cannot be loaded (e.g. offline with no cached model), falls back to a
      * multi-term lexical search so the tool still returns useful results.
+     *
+     * Always returns an envelope naming which engine answered and how much of the
+     * vault it could see. "0 results, semantic, 525 of 525 searched" and "0
+     * results, keyword fallback, 433 of 525 searched" are different facts about
+     * the world, and until now they were the same two characters: `[]`.
      */
-    searchByQuery(queryText: string, limit?: number, threshold?: number): Promise<SimilarNote[]>;
+    searchByQuery(queryText: string, limit?: number, threshold?: number): Promise<SearchResponse>;
+    /** Vector dataset from the notes Smart Connections has already embedded. */
+    private pluginVectors;
+    /**
+     * Wrap results with the facts a caller needs to judge them.
+     *
+     * `supplemental` is null on the lexical path, where the on-disk catch-up index
+     * was never built, so the vault total falls back to what the plugin knows and
+     * `unsearchable` stays honest rather than guessing at zero.
+     */
+    private buildResponse;
+    private buildCoverage;
+    /**
+     * The loud part. A caller that ignores everything else should still not be
+     * able to read a degraded answer as a clean one.
+     */
+    private coverageWarning;
+    /**
+     * Positive control: ask for notes we know are there, and see if they come back.
+     *
+     * "Did we get results" is the wrong question, because a blind index answers it
+     * the same way an empty topic does. The right question is "did we get the one
+     * we buried on purpose." A canary is only useful because it stops singing.
+     *
+     * Probes are drawn from the live index rather than a planted starter note, so
+     * this works on any vault, including one that has been running for a year.
+     * `canaryPath` pins a specific note when the kit ships one.
+     */
+    checkSearchHealth(canaryPath?: string): Promise<SearchHealthReport>;
+    /**
+     * Query a note by its own title. If retrieval cannot find a note when handed
+     * that note's title, it cannot find anything.
+     */
+    private pickProbeTargets;
     /**
      * Lexical fallback: multi-term keyword scoring.
      *

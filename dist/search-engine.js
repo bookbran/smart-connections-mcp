@@ -131,8 +131,13 @@ export class SearchEngine {
      *
      * Embeds the query with the same model used for the stored note embeddings
      * (bge-micro-v2) and ranks notes by cosine similarity. If the embedding model
-     * can't be loaded (e.g. offline with no cached model), falls back to a
+     * cannot be loaded (e.g. offline with no cached model), falls back to a
      * multi-term lexical search so the tool still returns useful results.
+     *
+     * Always returns an envelope naming which engine answered and how much of the
+     * vault it could see. "0 results, semantic, 525 of 525 searched" and "0
+     * results, keyword fallback, 433 of 525 searched" are different facts about
+     * the world, and until now they were the same two characters: `[]`.
      */
     async searchByQuery(queryText, limit = 10, threshold = 0.4) {
         try {
@@ -143,30 +148,153 @@ export class SearchEngine {
                 // answer while the best one is invisible, so they are embedded here and
                 // searched alongside. See `vault-indexer`.
                 const supplemental = await this.getSupplementalIndex();
-                if (supplemental.vectors.size === 0) {
-                    return this.getEmbeddingNeighbors(queryVec, limit, threshold);
-                }
-                const vectors = Array.from(this.loader.getSources().entries())
-                    .map(([path, src]) => ({
-                    id: path,
-                    vec: src.embeddings[this.embeddingModelKey]?.vec || [],
-                    metadata: { blocks: Object.keys(src.blocks || {}), lastModified: 0 },
-                }))
-                    .filter((item) => item.vec.length > 0);
+                const vectors = this.pluginVectors();
                 for (const [path, vec] of supplemental.vectors) {
                     vectors.push({ id: path, vec, metadata: { blocks: [], lastModified: 0 } });
                 }
-                return findNearestNeighbors(queryVec, vectors, limit, threshold).map((n) => ({
+                const results = findNearestNeighbors(queryVec, vectors, limit, threshold).map((n) => ({
                     path: n.id,
                     similarity: n.similarity,
                     blocks: n.metadata.blocks,
                 }));
+                return this.buildResponse('semantic', results, threshold, supplemental);
             }
         }
         catch (error) {
             console.error('Semantic search unavailable, falling back to lexical:', error);
         }
-        return this.searchByKeyword(queryText, limit, threshold);
+        const results = this.searchByKeyword(queryText, limit, threshold);
+        return this.buildResponse('keyword', results, threshold, null);
+    }
+    /** Vector dataset from the notes Smart Connections has already embedded. */
+    pluginVectors() {
+        return Array.from(this.loader.getSources().entries())
+            .map(([path, src]) => ({
+            id: path,
+            vec: src.embeddings[this.embeddingModelKey]?.vec || [],
+            metadata: {
+                blocks: Object.keys(src.blocks || {}),
+                lastModified: src.last_import?.mtime || 0,
+            },
+        }))
+            .filter((item) => item.vec.length > 0);
+    }
+    /**
+     * Wrap results with the facts a caller needs to judge them.
+     *
+     * `supplemental` is null on the lexical path, where the on-disk catch-up index
+     * was never built, so the vault total falls back to what the plugin knows and
+     * `unsearchable` stays honest rather than guessing at zero.
+     */
+    buildResponse(mode, results, threshold, supplemental) {
+        const coverage = this.buildCoverage(mode, supplemental);
+        const response = { mode, results, coverage, threshold };
+        const warning = this.coverageWarning(mode, coverage, results.length);
+        if (warning)
+            response.warning = warning;
+        return response;
+    }
+    buildCoverage(mode, supplemental) {
+        const fromPlugin = mode === 'semantic' ? this.pluginVectors().length : this.loader.getSources().size;
+        const supplementalCount = supplemental ? supplemental.vectors.size : 0;
+        const searched = fromPlugin + supplementalCount;
+        // Notes the plugin has never seen still exist on disk. Counting them keeps
+        // `vaultTotal` the size of the real vault rather than the size of the index.
+        const vaultTotal = this.loader.getSources().size + (supplemental?.missingFromPlugin ?? 0);
+        return {
+            searched,
+            vaultTotal,
+            fromPlugin,
+            supplemental: supplementalCount,
+            unsearchable: Math.max(0, vaultTotal - searched),
+        };
+    }
+    /**
+     * The loud part. A caller that ignores everything else should still not be
+     * able to read a degraded answer as a clean one.
+     */
+    coverageWarning(mode, coverage, resultCount) {
+        const parts = [];
+        if (mode === 'keyword') {
+            parts.push('SEARCH IS DEGRADED: the embedding model did not load, so this answer came from ' +
+                'literal keyword matching and will miss anything phrased differently. ' +
+                'Do not report an empty or thin result as "the vault has nothing on this."');
+        }
+        if (coverage.unsearchable > 0) {
+            parts.push(`${coverage.unsearchable} of ${coverage.vaultTotal} notes could not be searched this run.`);
+        }
+        if (resultCount === 0 && parts.length === 0) {
+            parts.push(`No matches above threshold. This was a full ${mode} search of ` +
+                `${coverage.searched} of ${coverage.vaultTotal} notes, so the vault genuinely ` +
+                'appears to have nothing closer. Lower the threshold to widen recall.');
+        }
+        return parts.length > 0 ? parts.join(' ') : undefined;
+    }
+    /**
+     * Positive control: ask for notes we know are there, and see if they come back.
+     *
+     * "Did we get results" is the wrong question, because a blind index answers it
+     * the same way an empty topic does. The right question is "did we get the one
+     * we buried on purpose." A canary is only useful because it stops singing.
+     *
+     * Probes are drawn from the live index rather than a planted starter note, so
+     * this works on any vault, including one that has been running for a year.
+     * `canaryPath` pins a specific note when the kit ships one.
+     */
+    async checkSearchHealth(canaryPath) {
+        const probeTargets = this.pickProbeTargets(canaryPath);
+        const probes = [];
+        let mode = 'semantic';
+        let coverage = this.buildCoverage('semantic', await this.getSupplementalIndex());
+        for (const target of probeTargets) {
+            // Threshold deliberately low: this asks whether the note is reachable at
+            // all, not whether it would rank well for a member's real question.
+            const response = await this.searchByQuery(target.query, 10, 0.2);
+            mode = response.mode;
+            coverage = response.coverage;
+            const rank = response.results.findIndex((r) => r.path === target.path);
+            probes.push({
+                query: target.query,
+                expectedPath: target.path,
+                found: rank >= 0,
+                rank: rank >= 0 ? rank + 1 : null,
+                similarity: rank >= 0 ? response.results[rank].similarity : null,
+            });
+        }
+        const probesPassed = probes.filter((p) => p.found).length;
+        // One miss is a ranking accident; a clean sweep of misses is blindness.
+        const alive = probes.length > 0 && probesPassed > 0 && mode === 'semantic';
+        return {
+            alive,
+            mode,
+            coverage,
+            modelKey: this.embeddingModelKey,
+            probes,
+            probesPassed,
+            probesRun: probes.length,
+            verdict: buildVerdict(alive, mode, coverage, probesPassed, probes.length),
+        };
+    }
+    /**
+     * Query a note by its own title. If retrieval cannot find a note when handed
+     * that note's title, it cannot find anything.
+     */
+    pickProbeTargets(canaryPath) {
+        const paths = Array.from(this.loader.getSources().keys());
+        if (paths.length === 0)
+            return [];
+        const chosen = [];
+        if (canaryPath && paths.includes(canaryPath))
+            chosen.push(canaryPath);
+        // Deterministic spread across the vault, so repeated runs are comparable and
+        // one unlucky note cannot flip the verdict on its own.
+        const sorted = [...paths].sort();
+        for (const fraction of [0.1, 0.5, 0.9]) {
+            const candidate = sorted[Math.floor(sorted.length * fraction)];
+            if (candidate && !chosen.includes(candidate))
+                chosen.push(candidate);
+        }
+        return chosen.map((path) => ({ path, query: titleFromPath(path) }));
     }
     /**
      * Lexical fallback: multi-term keyword scoring.
@@ -272,5 +400,29 @@ export class SearchEngine {
             modelKey: this.embeddingModelKey
         };
     }
+}
+/** Filename without directories or extension, hyphens and underscores as spaces. */
+function titleFromPath(notePath) {
+    const base = notePath.split(/[\\/]/).pop() || notePath;
+    return base.replace(/\.md$/i, '').replace(/[-_]+/g, ' ').trim();
+}
+function buildVerdict(alive, mode, coverage, passed, run) {
+    if (run === 0) {
+        return 'SEARCH IS BLIND: no notes are indexed at all, so every query will return nothing.';
+    }
+    if (mode === 'keyword') {
+        return ('SEARCH IS DEGRADED: the embedding model did not load and this server is ' +
+            'answering with literal keyword matching. Empty results from it mean nothing. ' +
+            'Fix the model before trusting any "the vault has nothing on this" answer.');
+    }
+    if (!alive) {
+        return (`SEARCH IS BLIND: ${run} notes were asked for by their own titles and ${run - passed} ` +
+            'did not come back. An empty result from this server cannot currently be trusted.');
+    }
+    const gap = coverage.unsearchable > 0
+        ? ` ${coverage.unsearchable} of ${coverage.vaultTotal} notes are not searchable yet.`
+        : '';
+    return (`Search is alive: ${passed} of ${run} planted queries came back, semantic mode, ` +
+        `${coverage.searched} of ${coverage.vaultTotal} notes searchable.${gap}`);
 }
 //# sourceMappingURL=search-engine.js.map
