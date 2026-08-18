@@ -36,27 +36,6 @@ export interface SupplementalIndex {
     missingFromPlugin: number;
 }
 export declare function listMarkdown(root: string, dir?: string, out?: string[]): string[];
-/**
- * Embed every note the plugin has not indexed. `knownPaths` is what Smart
- * Connections already covers, which we never duplicate.
- *
- * `maxEmbeddings` bounds a first run on a vault that has drifted badly, so the
- * first query after a long gap does not hang. It counts embed CALLS rather than
- * notes, because each note also costs one call per heading section. Anything
- * beyond the budget is embedded on the next call, and the shortfall shows up in
- * `coverage.unsearchable` rather than being hidden.
- */
-/**
- * Split a note into heading-delimited sections small enough to embed whole.
- *
- * Mirrors Smart Connections' own granularity (one chunk per heading path) with a
- * hard character ceiling, because a single heading can still hold more prose than
- * the model window and a truncated chunk reintroduces the exact blindness this
- * exists to fix. Oversized sections are split on paragraph boundaries.
- *
- * The note's path rides on every chunk: location and filename carry real topic
- * signal, and a bare section body often does not say what it is about.
- */
 export declare function splitIntoSections(relPath: string, text: string, maxChars?: number): string[];
 export declare function buildSupplementalIndex(vaultPath: string, knownPaths: Set<string>, maxEmbeddings?: number): Promise<SupplementalIndex>;
 //# sourceMappingURL=vault-indexer.d.ts.map

@@ -39,6 +39,14 @@ const SKIP_DIRS = new Set([
     'node_modules',
     '.stfolder',
 ]);
+/**
+ * Bump whenever chunking changes shape. Size and mtime cannot detect it: the
+ * file is identical, the chunks derived from it are not, so without this an
+ * unchanged note keeps vectors built by the old splitter forever. Learned by
+ * shipping a chunker fix that would have reached only the notes Dan happened to
+ * edit afterwards.
+ */
+const CHUNKER_VERSION = 2;
 export function listMarkdown(root, dir = root, out = []) {
     let entries;
     try {
@@ -109,6 +117,41 @@ function saveCache(vaultPath, cache) {
  * The note's path rides on every chunk: location and filename carry real topic
  * signal, and a bare section body often does not say what it is about.
  */
+/**
+ * Break one block of text into pieces that each fit `budget`.
+ *
+ * Line-first, because a markdown list is semantically a sequence of lines and
+ * cutting between them preserves meaning. Only a single line longer than the
+ * whole budget falls through to a character cut, which is rare and is still
+ * better than handing the embedder something it will silently truncate.
+ */
+function hardWrap(text, budget) {
+    if (text.length <= budget)
+        return [text];
+    const out = [];
+    let buf = [];
+    let size = 0;
+    const flush = () => {
+        if (buf.length)
+            out.push(buf.join('\n'));
+        buf = [];
+        size = 0;
+    };
+    for (const line of text.split(/\r?\n/)) {
+        if (line.length > budget) {
+            flush();
+            for (let i = 0; i < line.length; i += budget)
+                out.push(line.slice(i, i + budget));
+            continue;
+        }
+        if (size + line.length + 1 > budget)
+            flush();
+        buf.push(line);
+        size += line.length + 1;
+    }
+    flush();
+    return out;
+}
 export function splitIntoSections(relPath, text, maxChars = 1100) {
     const lines = text.split('\n');
     const sections = [];
@@ -125,19 +168,32 @@ export function splitIntoSections(relPath, text, maxChars = 1100) {
             sections.push(`${context}\n\n${body}`);
             return;
         }
+        const budget = Math.max(200, maxChars - context.length);
         let chunk = [];
         let size = 0;
-        for (const para of body.split(/\n\s*\n/)) {
-            if (size + para.length > maxChars - context.length && chunk.length) {
-                sections.push(`${context}\n\n${chunk.join('\n\n')}`);
-                chunk = [];
-                size = 0;
-            }
-            chunk.push(para);
-            size += para.length;
-        }
-        if (chunk.length)
+        const flushChunk = () => {
+            if (!chunk.length)
+                return;
             sections.push(`${context}\n\n${chunk.join('\n\n')}`);
+            chunk = [];
+            size = 0;
+        };
+        for (const para of body.split(/\n\s*\n/)) {
+            // A paragraph can exceed the whole budget on its own, and on this vault it
+            // routinely does: a tracker's phase is forty `- [ ]` lines with no blank
+            // line anywhere, so paragraph splitting returns one 11k-character blob.
+            // Splitting only on blank lines then emitted chunks far larger than the
+            // model window and `embedText` silently truncated them, which is the exact
+            // blindness sections were introduced to remove. Fall through to lines, and
+            // then to a hard character cut, so every chunk provably fits.
+            for (const piece of hardWrap(para, budget)) {
+                if (size + piece.length > budget)
+                    flushChunk();
+                chunk.push(piece);
+                size += piece.length;
+            }
+        }
+        flushChunk();
     };
     for (const line of lines) {
         const m = /^(#{1,6})\s+(.*)$/.exec(line);
@@ -194,7 +250,11 @@ maxEmbeddings = 3000) {
         // would leave those notes represented by their truncated opening forever,
         // since an unchanged file never invalidates on size or mtime. Treat a
         // section-less entry as stale, not as a hit.
-        const cacheUsable = cached && cached.size === st.size && cached.mtime === st.mtimeMs && cached.sections !== undefined;
+        const cacheUsable = cached &&
+            cached.size === st.size &&
+            cached.mtime === st.mtimeMs &&
+            cached.sections !== undefined &&
+            cached.chunker === CHUNKER_VERSION;
         if (cacheUsable) {
             vectors.set(rel, cached.vec);
             if (cached.sections && cached.sections.length)
@@ -235,7 +295,7 @@ maxEmbeddings = 3000) {
         vectors.set(rel, vec);
         if (sectionVecs.length)
             sections.set(rel, sectionVecs);
-        cache[rel] = { vec, sections: sectionVecs, size: st.size, mtime: st.mtimeMs };
+        cache[rel] = { vec, sections: sectionVecs, chunker: CHUNKER_VERSION, size: st.size, mtime: st.mtimeMs };
         newlyEmbedded++;
         cacheDirty = true;
     }
