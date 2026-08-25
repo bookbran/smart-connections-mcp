@@ -227,14 +227,15 @@ condition, not a repo bug.
   It told every agent to trust `mode: semantic` + `unsearchable: 0`, a predicate
   that cannot fail.
 
-- [ ] **0.2 Note the same caveat in `SEARCH-BRIDGE.md`** so a brain shipped from
-  the kit carries the warning until the fixed server ships.
+- [x] **0.2 Note the same caveat in `SEARCH-BRIDGE.md`** so a brain shipped from
+  the kit carries the warning until the fixed server ships. DONE 2026-08-25,
+  `second-brain-dashboard@17105aa`.
 
 ---
 
 ## Phase 1 -- One definition of reality (the architectural change)
 
-- [ ] **1.1 One canonical path function, before any set operation.**
+- [x] **1.1 One canonical path function, before any set operation.**
   `CorpusState` only buys structural correctness if every producer agrees what a
   path means. Normalize plugin paths, walker paths, supplemental cache keys and
   search-result paths through a single function. Test slash direction, `./`
@@ -243,19 +244,19 @@ condition, not a repo bug.
   `daily/2026/a.md`. This is architecture, not housekeeping: every later phase is
   a set operation and set operations on disagreeing keys fail silently.
 
-- [ ] **1.2 `VaultInventory`: what exists on disk, with an error class.**
+- [x] **1.2 `VaultInventory`: what exists on disk, with an error class.**
   `Map<canonicalPath, {path, size, mtimeMs}>` from `listMarkdown`. The only thing
   allowed to answer "does this note exist." **A file that exists but cannot be
   read is neither absent nor covered**: give it an explicit `unreadable`
   classification rather than letting it vanish from `onDisk` or count as covered.
 
-- [ ] **1.3 Canonical content hashing.** Implement
+- [x] **1.3 Canonical content hashing.** Implement
   `canonical-markdown-sha256-v1` per "What content hash means, precisely" above:
   UTF-8 decode, strip BOM, normalize CRLF and lone CR to LF, preserve everything
   else. Store the algorithm id beside every digest. Hash failures are their own
   error class, never silently treated as either fresh or stale.
 
-- [ ] **1.4 Characterize the Smart Connections hash before trusting it.**
+- [x] **1.4 Characterize the Smart Connections hash before trusting it.**
   Do not conclude it is "reproduced" because one file yields `v9osj6`. The
   question is not only how to compute it but **what it covers**. Vary each of
   these independently and record when the hash changes: body text, a heading,
@@ -264,13 +265,20 @@ condition, not a repo bug.
   directly, the way the mean-vs-CLS pooling detail was confirmed in August.
   **If it does not provably track the embedded content, treat it as
   unreproducible** and take the legacy-bootstrap path.
+  **OUTCOME: reproduced and proven, so the fallback is NOT taken.**
+  `murmur_hash_32_alphanumeric` from the plugin's own bundle; `embed_hash` is a
+  string copy of `read_hash` taken only after `embed_batch` resolved, which is
+  what makes it a fingerprint of embedded content. 7 of 516 live sources
+  reproduce exactly, the same 7 the diagnosis found fresh. Full characterization,
+  including the three ways it is wrong and their directions, in
+  [[2026-08-25-current-corpus-architecture]].
 
-- [ ] **1.5 Classify every plugin source as `fresh | stale | phantom |
+- [x] **1.5 Classify every plugin source as `fresh | stale | phantom |
   unreadable`.** Phantom: not in the inventory. Fresh: only per 1.4's outcome and
   the bootstrap rule. Expose as sets on the loader, never as freshness checks
   scattered through the engine.
 
-- [ ] **1.6 `CorpusState` is a SNAPSHOT, with a lifetime.**
+- [x] **1.6 `CorpusState` is a SNAPSHOT, with a lifetime.**
   Not "built once per server run": a long-lived server whose corpus was correct
   at launch is a smaller version of this same bug. Carry
   `generation` (or `snapshotId`), `verifiedAt`, `onDisk`, `pluginFresh`,
@@ -630,6 +638,29 @@ contains the fix and executes it.**
 
 ## Progress log
 _(One dated line per item as it ships.)_
+- 2026-08-25: **Phase 1 shipped.** `canonical-path.ts`, `content-hash.ts`,
+  `smart-connections-hash.ts`, `supplemental-store.ts`, `corpus-state.ts`, plus 25
+  tests. Live on the vault: 702 on disk, 525 plugin sources, **7 fresh / 509
+  stale / 9 phantom**, 695 semantically pending. Reconciliation costs ~300ms for
+  702 notes, which settles the snapshot-lifetime worry: per-operation
+  reconciliation is affordable and no cache is needed to make it so.
+  **Decisions made along the way:** (a) 1.4 resolved in favour of reusing plugin
+  vectors, with a tightening the tracker did not specify, requiring `last_embed`,
+  `last_read` AND `last_import` to all match, which closes the
+  read-and-import-but-never-embedded window for free; (b) blocks inherit their
+  source's verdict rather than being validated independently, because their line
+  ranges are themselves stale once the file changes; (c) added an `ineligible`
+  classification for notes under 50 characters, without which `coverageComplete`
+  could never be true on any vault holding a stub; (d) the inventory keeps a
+  `diskPath` beside the canonical path, because NFC normalization is a comparison
+  convenience and macOS wants its own spelling back to open a file; (e) legacy
+  supplemental cache entries are dropped rather than migrated, since they carry
+  no fingerprint and inventing one would be the original bug in a new costume.
+- 2026-08-25: **0.2 shipped.** `SEARCH-BRIDGE.md` now carries the interim
+  warning, marked with an `INTERIM-FRESHNESS-CAVEAT` comment so 9.4 can find it.
+  Also corrected its "the freshness trap is gone" bullet, which was true only of
+  notes the plugin never saw and false of every note the plugin saw once and the
+  member edited since. `second-brain-dashboard@17105aa`.
 - 2026-08-25: **Second review integrated.** Five correctness changes: the
   mtime/size skip cache is deleted (a preserved-timestamp same-size edit makes it
   claim false-fresh); the legacy-vector bootstrap path is defined (our own hash
