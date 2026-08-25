@@ -457,22 +457,22 @@ condition, not a repo bug.
 
 ## Phase 8 -- Regression fixtures
 
-- [ ] **8.1 Fixtures for every case that produced this bug:** stale edit,
+- [x] **8.1 Fixtures for every case that produced this bug:** stale edit,
   same-size edit, touched-but-unchanged file, deleted file still in the index,
   plugin-missing file, unreadable file, budget exhaustion mid-run, stale block
   outranking a fresh note, and graph/similarity calls against a stale source
   note.
 
-- [ ] **8.2 The combined case, which is the one that defeats a metadata cache:**
+- [x] **8.2 The combined case, which is the one that defeats a metadata cache:**
   same-size changed content **and** preserved timestamp **and** a different
   line-ending environment **and** a preexisting plugin vector, all at once. Each
   ingredient is tested separately elsewhere; this is the one that breaks anything
   clever.
 
-- [ ] **8.3 A fresh `git clone` of a vault must not invalidate a single note.**
+- [x] **8.3 A fresh `git clone` of a vault must not invalidate a single note.**
   Clone rewrites every mtime; canonical hashing must be indifferent to that.
 
-- [ ] **8.4 A test that fails on a stale index by construction**, so this class
+- [x] **8.4 A test that fails on a stale index by construction**, so this class
   of bug cannot ship silently again.
 
 ---
@@ -638,6 +638,19 @@ contains the fix and executes it.**
 
 ## Progress log
 _(One dated line per item as it ships.)_
+- 2026-08-25: **Phase 8 shipped.** 55 tests total. The gaps this phase filled
+  were the touched-but-unchanged file (the mirror of the same-size edit, and the
+  reason mtime is not the signal), a genuinely unreadable file via `icacls`, the
+  stale block through the REAL ranker, the combined case, and a real `git clone`
+  with `core.autocrlf=true` proving a machine switch invalidates nothing.
+  **One assertion had to be weakened, correctly.** The stale-block test first
+  demanded that the edited note could only ever surface lexically. It surfaced
+  semantically at 0.3+ from its CURRENT text, which is legitimate: bge-micro
+  finds real similarity between a note titled "Ledger" and a query about terms.
+  The test now asserts the MECHANISM (no stale block vector exists in the corpus,
+  and the plugin entry is classified stale) rather than a rank that depends on
+  model behaviour. Asserting on model output where the claim is about set
+  membership would have been a flaky test dressed as a strict one.
 - 2026-08-25: **Phases 2 through 7 shipped**, in one pass because they are one
   change to one file plus the facade underneath it. `current-corpus.ts` is the
   only thing retrieval ranks against; `search-engine.ts` was rewritten onto it;
