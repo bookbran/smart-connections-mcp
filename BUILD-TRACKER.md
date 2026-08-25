@@ -61,7 +61,7 @@ you decided and why** in the progress log, then keep going.
 
 | Question | Decision |
 |---|---|
-| Freshness predicate | Hash if reproducible. Otherwise `size` exact match AND `last_import.mtime >= file.mtimeMs - 2`. Never mtime alone. |
+| Freshness predicate | **Content hash, computed by us, cached.** Never mtime, never size alone. See "Why not mtime". |
 | Stale vectors in ranking | Dropped, whole-note and block together. |
 | Embed budget | Stays 3,000 interactive. Bulk work goes through the deliberate refresh path. |
 | Health field names | `semanticReady`, `retrievalProbePassed`, `freshnessVerified`, `coverageComplete`, `negativeResultsTrustworthy`. Keep `alive` as derived. |
@@ -107,6 +107,74 @@ Measured on Dan's 700-note vault, 2026-08-25:
 
 ---
 
+## Why not mtime, and why this repo already knew
+
+An earlier draft of this tracker made freshness a `size` plus `mtime` test. That
+was wrong, and the evidence was already in this codebase. From
+`second-brain-dashboard@e2b0e66`, 2026-08-24, which moved the recency signal off
+mtime for the globe and the project rail:
+
+> The recency signal read file mtime, which records when a PROCESS wrote a file,
+> not when a person worked on it. A sync, checkout, restore, or tag migration
+> rewrites every mtime to now and flattens the ranking, which bites hardest on a
+> vault that lives on two machines.
+
+That is exactly this vault. It travels between ROMAN-GLADIATOR and The-Computer
+by git, and a `git pull` or a fresh clone rewrites mtimes wholesale. An
+mtime-based freshness test would therefore mark the entire vault stale on every
+machine switch: 700 notes, roughly 8,000 embed calls, against a 3,000-call
+budget, three runs to converge, **every time Dan switches laptops.** Not wrong in
+the dangerous direction, since it fails toward false-stale, but wasteful enough
+to make the feature feel broken.
+
+Size is stable across git and misses the case Dan named in review: a same-size
+edit. So neither half is sufficient and the combination inherits both flaws.
+
+**A content hash is immune to all of it at once**: git checkouts, OneDrive,
+robocopy, timestamp-preserving copies, timestamp-destroying copies, and same-size
+edits. Hashing 700 files is on the order of a second; re-embedding 700 notes is
+minutes. The cheap thing is also the correct thing.
+
+Keep mtime and size as a **skip** heuristic only: if both are unchanged since the
+last hash, do not bother re-hashing. That is an optimization that can only cause
+extra work when it is wrong, never a false claim of freshness.
+
+---
+
+## Two things about generated files, found 2026-08-25
+
+Relevant because they are what an agent in a NEW brain reads first, and because
+this build is fundamentally about generated artifacts drifting from their source
+with nothing checking.
+
+**`server.js` is hand-written.** It is not generated from anything, so there is
+no generator to conflict with when this build edits it. Good.
+
+**The contract IS generated.** `dev/compile-contract.js` compiles
+`dashboard/contract/canonical.js` into `contract/runtime-dashboard.md` and
+`runtime-editor.md`, which `server.js` injects into every live session prompt.
+Verified current: recompiling produces byte-identical content. Note the
+generators live at the REPO ROOT `dev/`, not `dashboard/dev/`.
+
+**The contract says nothing at all about search.** Zero hits for search, recency,
+freshness or staleness. So there is no conflict for this build to resolve, which
+was the worry. But it is also a gap: the document every agent reads first is
+silent on whether an empty search result can be believed, which is precisely the
+thing that went wrong. Phase 9.3 covers `SEARCH-BRIDGE.md`; the canonical
+contract is a second, earlier surface and gets its own item.
+
+**`BRAIN.md` is stale against its generator, by its header block only.**
+Regenerating removes 10 lines of explanatory HTML comment. No behavioral drift:
+everything an agent acts on is identical. Worth regenerating for hygiene, not an
+emergency. The `brain-sync` test that flags this fails on this machine for a
+second, unrelated reason: `core.autocrlf=true` here and the generators write LF,
+so every generated file reads as modified and every byte-comparison test fails.
+That is a local-environment condition, not a repo bug, and it is why the earlier
+report blamed CRLF for something that turned out to be a real 10-line drift
+underneath.
+
+---
+
 ## Phase 0 -- Stop the bleeding (today, before any code)
 
 - [x] **0.1 Patch [[CLAUDE]] rule 14 in the vault.** DONE 2026-08-25, vault `3aaf7c5`. Right now the rule tells
@@ -134,18 +202,24 @@ Measured on Dan's 700-note vault, 2026-08-25:
   `pluginFresh`/`pluginStale`/`pluginPhantoms` sets on the loader, not as
   scattered `statSync` calls in the engine.
 
-- [ ] **1.3 Freshness predicate, hash-first.** Investigate whether
-  `last_import.hash` / `last_embed.hash` is reproducible from file contents
-  (both are `"v9osj6"` on a fresh entry, so start by hashing that file's known
+- [ ] **1.3 Freshness predicate: CONTENT HASH, not time.** Investigate whether
+  `last_import.hash` / `last_embed.hash` is reproducible from file contents (both
+  are `"v9osj6"` on a fresh entry, so start by hashing that file's known
   2121-byte July content and looking for a 6-char base36 match; check Smart
   Connections' bundled `main.js` the way the pooling detail was confirmed in
-  August). If reproducible, hash is authoritative and mtime+size is only a
-  fast-path skip. **If not, DECIDED fallback, no need to ask:** an entry is fresh
-  only when `size` matches exactly AND `last_import.mtime >= file.mtimeMs - 2`.
-  Two milliseconds, not one second: it covers JSON round-trip precision loss and
-  nothing else. Size mismatch is stale regardless of any timestamp. Done when a table of
-  cases passes: unchanged file, same-size edit, touched-but-unchanged,
-  timestamp-preserving copy, timestamp-destroying copy.
+  August). If reproducible, use theirs. **If not, DECIDED: hash the file
+  ourselves and cache the digest.** Not mtime, not size, not both.
+
+  This reverses an earlier draft of this tracker, and the reversal is
+  load-bearing. See "Why not mtime, and why this repo already knew" above. mtime
+  and size may be used ONLY as a cheap skip (unchanged mtime AND size means do
+  not bother re-hashing); they may never be the authority that declares something
+  fresh.
+
+  Done when a table of cases passes: unchanged file, same-size edit,
+  touched-but-unchanged, timestamp-preserving copy, timestamp-destroying copy,
+  and a fresh `git clone` of the vault (which rewrites every mtime and must NOT
+  invalidate a single note).
 
 - [ ] **1.4 `CorpusState`: the single object every retrieval feature consumes.**
   `onDisk`, `pluginFresh`, `pluginStale`, `pluginPhantoms`, `supplementalFresh`,
@@ -317,6 +391,21 @@ here.
   an agent learns what search can promise. Remove the Phase 0.2 warning, document
   the new health fields, and say plainly which single field answers "can I trust
   an empty result."
+
+- [ ] **9.4a The canonical contract learns that search can be blind.**
+  `dashboard/contract/canonical.js` is what compiles into the runtime contract
+  injected in EVERY session, so it is the earliest surface an agent in a new
+  brain reads, earlier than `SEARCH-BRIDGE.md` and earlier than any note. It
+  currently says nothing about search at all. Add one short invariant: an empty
+  search result is only evidence of absence when the health signal says so, and
+  name the field. Then recompile with `node dev/compile-contract.js` (repo root
+  `dev/`, not `dashboard/dev/`) and commit the regenerated runtime files, or the
+  shipped contract will not match its own source.
+
+- [ ] **9.4b Regenerate `BRAIN.md`.** It currently carries 10 lines its
+  generator no longer produces. Header comment only, no behavioral drift, but
+  this build has no business shipping a generated file that disagrees with its
+  generator. `node dev/sync-brain.js`.
 
 - [ ] **9.4 Simplify vault rule 14 to the shipped signal.** Phase 0.1 was
   deliberately interim. Now that the server reports it, the rule keys on
