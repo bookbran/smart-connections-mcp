@@ -199,6 +199,12 @@ test('1.2 the inventory holds every markdown file and nothing else', () => {
     v.write('c.txt', 'not a note');
     v.write('.obsidian/workspace.md', 'plugin furniture, not a note');
     v.write('node_modules/pkg/readme.md', 'dependency noise');
+    // A fresh brain ships these, and without the dotted-segment rule a member's
+    // very first search returns the agent's own scaffolding. Caught on a real
+    // brand-new brain, where a health probe picked a skill file as a
+    // representative note.
+    v.write('.claude/skills/compass/SKILL.md', 'agent scaffolding, not a note');
+    v.write('.dashboard-about.md', 'dashboard furniture, not a note');
     const inv = VaultInventory.build(v.root);
     assert.deepEqual(inv.paths().sort(), ['a.md', 'nested/deep/b.md']);
     assert.equal(inv.errors.length, 0);

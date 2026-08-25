@@ -47,15 +47,25 @@ import { canonicalPath, caseFold, isMarkdownPath } from './canonical-path.js';
 import { CONTENT_HASH_ALGORITHM, canonicalContentHash, canonicalizeMarkdown } from './content-hash.js';
 import { verifyPluginSource } from './smart-connections-hash.js';
 import { loadSupplementalCache, entryIsCurrent } from './supplemental-store.js';
-/** Mirrors what Smart Connections itself skips, plus our own bookkeeping. */
-const SKIP_DIRS = new Set([
-    '.obsidian',
-    '.smart-env',
-    '.git',
-    '.trash',
-    'node_modules',
-    '.stfolder',
-]);
+/**
+ * What is not a note.
+ *
+ * `node_modules` is the only entry that is not a dotfile, because every dotted
+ * path segment is skipped as a class. That rule matters more than it looks: a
+ * fresh brain ships `.claude/skills/*.md`, and without it a member's very first
+ * search returns the agent's own scaffolding. Verified on a brand new brain
+ * during the fresh-download work, where a health probe picked
+ * `.claude/skills/compass/references/techniques.md` as a representative note.
+ *
+ * It matches the rule the dashboard already applies when counting notes:
+ * "dotfiles, and the vault's own furniture, are not notes and are not counted."
+ * Skills are loaded by name, never found by meaning, so nothing loses a way in.
+ */
+const SKIP_DIRS = new Set(['node_modules']);
+/** A dotted directory or filename is furniture, at any depth. */
+function isHiddenSegment(name) {
+    return name.startsWith('.');
+}
 /**
  * Below this many characters of canonical text a note carries no retrievable
  * meaning and is never embedded. It is therefore INELIGIBLE rather than
@@ -98,7 +108,7 @@ export class VaultInventory {
             return;
         }
         for (const entry of dirents) {
-            if (SKIP_DIRS.has(entry.name))
+            if (SKIP_DIRS.has(entry.name) || isHiddenSegment(entry.name))
                 continue;
             const full = join(dir, entry.name);
             if (entry.isDirectory()) {

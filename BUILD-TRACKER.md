@@ -487,7 +487,7 @@ priority surface in this build.**
 dashboard, whose `seedSearchBridge` clones the bridge from GitHub on a brain's
 first boot. Verify that claim rather than assuming it.
 
-- [ ] **9.1 Pin the bridge to a tested revision.** DECIDED, and it changes the
+- [x] **9.1 Pin the bridge to a tested revision.** DECIDED, and it changes the
   release model. Do not have installs track whatever happens to be on `main`: a
   future bad commit would ship to every brain on next boot, before any kit
   release tested it. The dashboard carries a **target revision** (tag or commit);
@@ -496,14 +496,14 @@ first boot. Verify that claim rather than assuming it.
   tracking `main` is ever wanted, that is a deliberate product decision recorded
   as such, not an installer detail.
 
-- [ ] **9.2 Prove the fix reaches a brand new brain, end to end, unaided.** On a
+- [x] **9.2 Prove the fix reaches a brand new brain, end to end, unaided.** On a
   throwaway brain directory, boot the dashboard fresh and let `seedSearchBridge`
   clone and build with nobody helping it. Then run `check_search_health` and
   confirm the new fields are present and honest. Done when a brain that never
   existed before comes up with verified-current search and no human typed a
   command.
 
-- [ ] **9.3 Existing installs self-heal to the pinned revision.**
+- [x] **9.3 Existing installs self-heal to the pinned revision.**
   `seedSearchBridge` moves an existing bridge clone to the target revision when
   it is safe: it is a git repo, the remote is `bookbran/smart-connections-mcp`,
   the tree is clean. Then check out the pinned revision and rebuild if it moved.
@@ -513,12 +513,12 @@ first boot. Verify that claim rather than assuming it.
   the installs of people who will never know to ask. Detached and non-fatal like
   the install. Test both legs, the clean move and the refusal.
 
-- [ ] **9.4 Retire the interim caveat and state the real contract.**
+- [x] **9.4 Retire the interim caveat and state the real contract.**
   `SEARCH-BRIDGE.md` ships in the zip and into every seeded brain. Remove the
   Phase 0.2 warning, document the new health fields, and say plainly which single
   field answers "can I trust an empty result."
 
-- [ ] **9.5 The canonical contract learns that search can be blind.**
+- [x] **9.5 The canonical contract learns that search can be blind.**
   `dashboard/contract/canonical.js` compiles into the runtime contract injected
   in EVERY session, so it is the earliest surface an agent in a new brain reads.
   Add one short invariant: an empty search result is only evidence of absence
@@ -526,16 +526,16 @@ first boot. Verify that claim rather than assuming it.
   `node dev/compile-contract.js` (repo root `dev/`) and commit the regenerated
   runtime files, or the shipped contract will not match its own source.
 
-- [ ] **9.6 Regenerate `BRAIN.md`.** It carries 10 lines its generator no longer
+- [x] **9.6 Regenerate `BRAIN.md`.** It carries 10 lines its generator no longer
   produces. Header comment only, but this build has no business shipping a
   generated file that disagrees with its generator. `node dev/sync-brain.js`.
 
-- [ ] **9.7 Simplify vault rule 14 to the shipped signal.** Phase 0.1 was
+- [x] **9.7 Simplify vault rule 14 to the shipped signal.** Phase 0.1 was
   deliberately interim. Now that the server reports it, the rule keys on
   `negativeResultsTrustworthy === true`. Leaving the interim wording in place
   after the fix ships is its own kind of stale.
 
-- [ ] **9.8 Measure time to first useful search result, not just budget
+- [x] **9.8 Measure time to first useful search result, not just budget
   compliance.** A fresh brain embeds its whole vault on first use. The number
   that matters to a member is how long until their first question returns
   something useful, with lexical answering immediately while semantic converges.
@@ -638,6 +638,55 @@ contains the fix and executes it.**
 
 ## Progress log
 _(One dated line per item as it ships.)_
+- 2026-08-25: **Phase 9 shipped, and it found two real bugs that no test would
+  have.** Verified by booting actual throwaway brains, not by reasoning about it.
+  - **9.1/9.3 pinning.** Confirmed first: the zip contains zero bridge files, so
+    the clone target is the whole release model. Installs now target
+    `astrolabe-bridge-v1.1.0`. The tag is namespaced deliberately: this fork
+    carries upstream tags `v1.0.0` and `v2.0.0` on unrelated history, and
+    upstream's `v2.0.0` outranks anything we will tag for a while, so "pin the
+    newest tag" would install a different project. Self-heal moves a clone only
+    when it is a git checkout, on our remote, with a clean tree; anything else
+    logs the specific reason and leaves it completely alone.
+  - **BUG 1, found on a real fresh brain: search could never start.**
+    `check_search_health` took a corpus with `skipIndexing`, so a new brain had
+    no vectors, so no probe targets, so no probes, so nothing embedded, so no
+    vectors. A brain that installed itself perfectly reported "SEARCH HAS
+    NOTHING TO SEARCH" and would have forever. Health now embeds, finishing the
+    job when the job is small (<=60 pending) and taking the interactive slice
+    when it is not. The snapshot is taken BEFORE the budget is chosen, because
+    sizing from `peek()` looks equivalent and is not: the first call of a process
+    has no snapshot and would take the small slice on exactly the new brain that
+    wanted the whole thing.
+  - **BUG 2: a fresh brain indexed its own scaffolding.** A health probe picked
+    `.claude/skills/compass/references/techniques.md` as a representative note.
+    Dotted path segments are now skipped as a class, matching the rule the
+    dashboard already applies. Fresh brain went from 10 "notes" to 5; the real
+    vault from 702 to 697.
+  - **9.6 was NOT header-only drift, and the tracker was wrong about it.**
+    Running the generator would have DELETED the whole "Charting a course, and
+    building" section: it existed only in the generated `BRAIN.md`, hand-edited
+    into a file whose own header says "GENERATED. Do not edit." Neither input had
+    it. Restored to `apc-second-brain-kit/functions/protected/CLAUDE.md`, which
+    is the region of the output it sits in, then regenerated. BRAIN.md and its
+    generator now agree with nothing lost. This is the same class of problem this
+    whole build is about: a generated artifact drifting from its source with
+    nothing checking.
+  - **9.8 measured, on a 702-note vault with no semantic index at all:** first
+    query **1,242ms**, five useful results, including the right note surfaced by
+    lexical rescue at 0.000 semantic score. Second query 1,013ms, and that note
+    now ranked FIRST at 0.677 because the first query repaired it. Health
+    honestly said `coverageComplete: false` and "SEARCH IS CONVERGING"
+    throughout. The multi-minute first query the budget cap exists to prevent is
+    nowhere near.
+  - **9.2 proven end to end.** A brain that never existed: booted, cloned the
+    pinned tag unaided, built, and answered `check_search_health` over real MCP
+    stdio with `negativeResultsTrustworthy: true`. Nobody typed a command.
+  - **Install log made diagnosable.** Measured while verifying: a SUCCESSFUL
+    `git clone` writes nothing at all when its output is redirected to a file,
+    because git suppresses its chatter when stderr is not a terminal. The log of
+    a perfect install was two echo lines. Every step now announces itself and its
+    exit code, which depends on no tool's opinion about who it is talking to.
 - 2026-08-25: **Phase 8 shipped.** 55 tests total. The gaps this phase filled
   were the touched-but-unchanged file (the mirror of the same-size edit, and the
   reason mtime is not the signal), a genuinely unreadable file via `icacls`, the
