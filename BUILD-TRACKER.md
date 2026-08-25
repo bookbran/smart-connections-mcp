@@ -580,7 +580,7 @@ opening, which is this bug, pre-installed.
   instantly complete. A member who migrates and immediately searches should not
   conclude their notes vanished.
 
-- [ ] **10.5 Verify the whole migration path on a real copy.** Take a throwaway
+- [x] **10.5 Verify the whole migration path on a real copy.** Take a throwaway
   copy of a real multi-hundred-note vault, run the migration passes against it,
   and confirm search comes up correct and honest at the end. Copy, never the
   original.
@@ -593,24 +593,24 @@ Packaging phases are not exempt from verification, but the standard is different
 they cannot "fail on a stale index," so instead **prove the built artifact
 contains the fix and executes it.**
 
-- [ ] **11.1 Rebuild the Astrolabe zip.**
+- [x] **11.1 Rebuild the Astrolabe zip.**
   `powershell -NoProfile -ExecutionPolicy Bypass -File dashboard/dev/build-astrolabe-zip.ps1`
   in `second-brain-dashboard`. Then open the built zip and confirm the changed
   files are inside it. The builder excludes `test`, `docs`, `dist` and
   `dist-template`, and a file in the wrong place ships as silence.
 
-- [ ] **11.2 Prove the artifact executes the fix.** Extract the built zip to a
+- [x] **11.2 Prove the artifact executes the fix.** Extract the built zip to a
   clean directory, run it against a throwaway brain, and confirm the health
   output carries the new fields. Building is not shipping and containing is not
   executing.
 
-- [ ] **11.3 Cut the kit release.** In `apc-second-brain-kit`: copy the zip to
+- [x] **11.3 Cut the kit release.** In `apc-second-brain-kit`: copy the zip to
   `functions/protected/astrolabe.zip`, bump `functions/kit-version.json`
   (currently 0.5.0, minor bump), record the pinned bridge revision from 9.1, and
   add a `CHANGELOG.md` entry written for a member. The repo documents the
   sequence under "How to cut a release".
 
-- [ ] **11.4 Deploy and verify live.** `npm run deploy` from `functions/`.
+- [x] **11.4 Deploy and verify live.** `npm run deploy` from `functions/`.
   **Verify by fetching `https://apc-second-brain-kit.web.app/version` and reading
   the version back.** A successful deploy message is not verification.
 
@@ -638,6 +638,34 @@ contains the fix and executes it.**
 
 ## Progress log
 _(One dated line per item as it ships.)_
+- 2026-08-25: **10.5 verified on a real copy, and 11.1 through 11.4 shipped.**
+  - **10.5, the whole migration path on a real 697-note vault carrying its real
+    months-old `.smart-env`.** On arrival: 525 plugin sources, 7 fresh, 509
+    stale, 9 phantom, `negativeResultsTrustworthy: false`. Five
+    `refresh_search_index` passes, **162 seconds, zero failed, zero raced**.
+    After: 697 of 697 searchable, 12,741 sections, 7 vectors reused from the
+    plugin (exactly the ones that verified) and 690 embedded here, and a note
+    written that morning ranking first at 0.739. The verdict flipped to "An empty
+    result from this server IS evidence of absence."
+  - **11.1** zip rebuilt and opened: every changed file is inside it, the pin is
+    in the shipped `server.js`, and the Phase 0.2 interim caveat is gone.
+  - **11.2** the built zip, extracted to a clean directory and run against a
+    throwaway brain, cloned the pinned revision unaided and answered
+    `check_search_health` over real MCP stdio with
+    `negativeResultsTrustworthy: true`. Containing is not executing, so this was
+    run rather than reasoned about.
+  - **11.3** kit 0.6.0, with `bridgeRevision` recorded in `kit-version.json`.
+    **Found while cutting it:** `functions/protected/SEARCH-BRIDGE.md` is a
+    SECOND copy of that document and had drifted a long way behind the
+    dashboard's, still describing the bridge as a manual install and predating
+    the auto-install entirely. Synced. Two copies of one document in two repos is
+    a standing hazard and is now at least written down.
+  - **11.4** deployed, and verified by fetching `/version` and reading 0.6.0
+    back, not by trusting the deploy message.
+  - **The pin is frozen.** It moved twice while the build finished, which was
+    safe because nothing referenced it. Now that kit 0.6.0 records it, it never
+    moves again: a pin that can be repointed is not a pin. Written into the
+    comment beside `BRIDGE_TARGET` so the next person does not have to infer it.
 - 2026-08-25: **Phase 10, docs and fixtures.** `MIGRATE.md` gets a real search
   step: check the bridge, call `refresh_search_index`, call it again while
   `remaining` is above zero, say where it landed. Written accurately rather than
