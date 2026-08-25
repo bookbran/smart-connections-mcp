@@ -237,6 +237,11 @@ _(One dated line per item as it ships.)_
 
 ## Resuming this build
 
+A ready-to-paste kickoff prompt for a genuinely fresh session lives in
+[`KICKOFF-PROMPT.md`](KICKOFF-PROMPT.md), including the hard rules and the
+verification standard. Prefer resuming over re-briefing when the session still
+exists.
+
 Default: `claude --continue` in this folder, or `claude --resume` and pick this
 build's session. Read this tracker top to bottom, skim the diagnosis note in the
 vault, check `git log` against what the tracker claims, then start at the first
