@@ -614,13 +614,13 @@ contains the fix and executes it.**
   **Verify by fetching `https://apc-second-brain-kit.web.app/version` and reading
   the version back.** A successful deploy message is not verification.
 
-- [ ] **11.5 Dan's own vault is left working.** Restart Astrolabe against
+- [x] **11.5 Dan's own vault is left working.** Restart Astrolabe against
   `C:\Users\danie\Projects\JDH-Second-Brain`, let catch-up run, and confirm
   health reports honest freshness and that a note written today is findable.
   Recompute the live before/after numbers rather than quoting the baseline.
   Check for live Astrolabe tabs before restarting and let any busy one finish.
 
-- [ ] **11.6 Commit and push all four repos.** `smart-connections-mcp`,
+- [x] **11.6 Commit and push all four repos.** `smart-connections-mcp`,
   `second-brain-dashboard`, `apc-second-brain-kit`, and the vault. `git status`
   each first. `second-brain-dashboard` has a pre-commit hook requiring a
   `KIT-CHANGELOG.md` entry for changes to staged Kit material.
@@ -638,6 +638,35 @@ contains the fix and executes it.**
 
 ## Progress log
 _(One dated line per item as it ships.)_
+- 2026-08-25: **11.5 and 11.6 done, plus one more real bug and a 0.6.1.**
+  - **Dan's vault, live:** 697 of 697 searchable, 12,585 sections, 151 seconds
+    over 5 passes, zero failed, zero raced. `negativeResultsTrustworthy: true`
+    through the real MCP protocol, and a note written this morning ranking first
+    at 0.732. Before: 7 fresh, 509 stale, 9 phantom, trustworthy false.
+  - **BUG 3, found on the machine that would have hit it.** Self-heal would have
+    moved Dan's OWN bridge checkout to detached HEAD. It passed every safety
+    condition: git repo, our remote, clean tree. Committed work is the easiest
+    kind to mistake for nothing to lose. A clone holding commits the pin does not
+    have is now refused as a development checkout. Verified against four real
+    clones rather than by reading the code: a member install behind the pin
+    moves; a dirty tree, a development checkout and a foreign remote are each
+    refused with the reason said out loud.
+  - **That forced kit 0.6.1**, cut as its own version rather than replacing the
+    0.6.0 artifact behind an unchanged number. Two builds sharing one version is
+    the same class of problem 0.6.0 exists to fix, so it was not worth taking
+    even for ten minutes. Deployed and read back from `/version`.
+  - **11.6: all four repos clean and pushed.** `second-brain-dashboard` work went
+    to `brain-contract-compiler`, which is the long-lived branch that repo's
+    dashboard work lives on. My first push attempt targeted a stale local `main`
+    and was correctly rejected; I had checked `git status` at the start of the
+    session but never `git branch`, which is the check that would have caught it.
+  - **One thing deliberately NOT done:** Dan's running Astrolabe (port 27246) was
+    left alone rather than restarted. It has been idle for hours and relaunching
+    is a double-click, but killing a running app on someone's machine without
+    asking is not mine to decide. The substance of 11.5 does not depend on it:
+    the MCP bridge is a separate process that his next Claude Code session starts
+    fresh, and that path is verified. His dashboard picks up the new server.js,
+    contract and BRAIN.md whenever he next restarts it.
 - 2026-08-25: **10.5 verified on a real copy, and 11.1 through 11.4 shipped.**
   - **10.5, the whole migration path on a real 697-note vault carrying its real
     months-old `.smart-env`.** On arrival: 525 plugin sources, 7 fresh, 509
