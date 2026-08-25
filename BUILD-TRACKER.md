@@ -19,7 +19,12 @@ Disk presence establishes existence; a verified-current vector establishes
 semantic coverage. The plugin stops being a source of truth and becomes one
 source of reusable embeddings.
 
-Phases are ordered blockers-first. Phase 1 is the architectural change Dan
+Phases are ordered blockers-first, and the build is not done when the engine is
+fixed. **Phase 9 ships it**: a rebuilt zip, a kit release, a live deploy, and the
+board told. A correctness fix that only ever runs on Dan's machine has not
+helped the person the kit was built for.
+
+Phase 1 is the architectural change Dan
 called the deepest improvement; doing Phase 2 onward without it just scatters
 `statSync` freshness checks through the engine and leaves the next tool to
 rediscover this.
@@ -222,6 +227,83 @@ Measured on Dan's 700-note vault, 2026-08-25:
 
 - [ ] **8.2 A test that fails on a stale index by construction**, so this class
   of bug cannot ship silently again.
+
+---
+
+## Phase 9 -- Ship it to everyone, not just Dan's vault
+
+Everything above fixes the engine. This phase is what turns that into something
+a member who downloads the zip actually receives, and it ends by telling the
+board.
+
+**Read this before starting: the zip does NOT contain the bridge.** It contains
+the dashboard, whose `seedSearchBridge` clones `bookbran/smart-connections-mcp`
+from GitHub on a brain's first boot. So a fix merged to `main` here reaches every
+NEW brain with no zip rebuild at all, and reaches NO existing install, ever,
+because nothing pulls. That asymmetry is the whole content of this phase, and it
+is a claim to verify rather than assume. Assuming it is how the original bug got
+here.
+
+- [ ] **9.1 Prove the fix reaches a new brain end to end.** On a throwaway brain
+  directory, boot the dashboard fresh and let `seedSearchBridge` do its clone and
+  build unaided. Then run `check_search_health` against it and confirm the new
+  freshness fields are present and honest. Done when a brain that has never
+  existed before comes up with verified-current search and nobody typed a command.
+
+- [ ] **9.2 Decide what happens to existing installs.** Every member already
+  running has a clone pinned at whatever `main` was on their first boot, and no
+  mechanism updates it. Options, in rough order of preference: have
+  `seedSearchBridge` fast-forward an existing clean clone on boot (cheap, and the
+  bridge is not the member's code to conflict with); or expose a maintenance
+  operation; or version-check and tell the agent to offer it. **Bring the
+  recommendation to Dan rather than picking silently**, because it decides
+  whether a shipped brain self-heals or quietly stays broken. Whatever is chosen
+  needs a test.
+
+- [ ] **9.3 Retire the Phase 0.2 caveat and describe the real contract.**
+  `SEARCH-BRIDGE.md` ships inside the zip and into every seeded brain, so it is
+  where an agent learns what search can and cannot promise. Remove the interim
+  warning, document the new health fields, and state plainly which one answers
+  "can I trust an empty result."
+
+- [ ] **9.4 Simplify vault rule 14 to the shipped signal.** Phase 0.1 was
+  deliberately interim wording. Per Dan's ruling, once the server reports it,
+  the rule keys on one machine-readable field
+  (`negativeResultsTrustworthy === true`) rather than making every agent
+  reconstruct a four-field predicate. Vault repo, `CLAUDE.md`.
+
+- [ ] **9.5 Rebuild the Astrolabe zip.**
+  `powershell -NoProfile -ExecutionPolicy Bypass -File dashboard/dev/build-astrolabe-zip.ps1`
+  in `second-brain-dashboard`. Then actually open the built zip and confirm the
+  changed files are in it; the builder excludes `test`, `docs`, `dist` and
+  `dist-template`, and a file in the wrong place ships as silence.
+
+- [ ] **9.6 Cut the kit release.** In `apc-second-brain-kit`: copy the zip to
+  `functions/protected/astrolabe.zip`, bump `functions/kit-version.json`
+  (currently 0.5.0; this is a minor bump), and add a `CHANGELOG.md` entry written
+  for a member, saying what changes for them rather than what changed in the
+  code. The repo documents this sequence under "How to cut a release".
+
+- [ ] **9.7 Deploy and verify live.** `npm run deploy` from `functions/`. Dan
+  handles the Firebase auth prompt if it appears; `firebase login:list` should
+  show `dan@aportlandcareer.com`. **Verify by fetching
+  `https://apc-second-brain-kit.web.app/version` and reading the version back.**
+  A successful deploy message is not verification.
+
+- [ ] **9.8 Commit and push all four repos.** `smart-connections-mcp`,
+  `second-brain-dashboard`, `apc-second-brain-kit`, and the vault. Check each for
+  a dirty tree first. Note that `second-brain-dashboard` has a pre-commit hook
+  requiring a `KIT-CHANGELOG.md` entry for any change to staged Kit material.
+
+- [ ] **9.9 Update the board, last.** Post results to
+  [apc-ai-course#138](https://github.com/goggledefogger/apc-ai-course/issues/138):
+  what shipped, the before and after numbers from Dan's own vault (it started at
+  7 fresh of 525), confirmation that a new brain from the zip gets verified
+  search with no manual steps, what was decided for existing installs in 9.2, and
+  anything that turned out differently from this tracker's assumptions. Close the
+  issue only if 9.2 left nothing open. Danny and Roy were asked for a read on
+  `CorpusState` and the health field names; answer whatever they raised in the
+  same pass.
 
 ---
 

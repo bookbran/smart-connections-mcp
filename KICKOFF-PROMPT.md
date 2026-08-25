@@ -93,6 +93,10 @@ TWO THINGS TO CONFIRM WITH DAN BEFORE BUILDING ON THEM
 - Phase 6: the health field names are a surface agents will code against.
   Show the proposed shape before implementing it.
 
+THE BUILD IS NOT DONE WHEN THE ENGINE IS FIXED. Phase 9 rebuilds the Astrolabe
+zip, cuts a kit release, deploys it, and reports results to the board. A fix that
+only runs on Dan's machine has not helped the person the kit was built for.
+
 Start by reading the tracker, then run `git log --oneline -5` in the repo to
 confirm it matches what the tracker claims, then begin Phase 1.1.
 ```
@@ -110,6 +114,13 @@ remove.
 
 Phases 5 through 8 are propagation and hardening. They are safe to start a
 separate sitting on, and the tracker's own resume section covers picking them up.
+
+**Phase 9 is not optional and is not cleanup.** It rebuilds the Astrolabe zip,
+cuts and deploys a kit release, and reports to the board. Everything before it
+only fixes the engine on the machine it was built on; Phase 9 is what reaches a
+member who downloads the zip. Note the thing it opens with: the zip contains the
+installer, not the bridge, so a merge to `main` reaches every new brain and no
+existing one. Verify that rather than assuming it.
 
 ## If the hash turns out not to be reproducible
 
