@@ -394,11 +394,35 @@ test('5.5 block headings for a stale note come from the CURRENT markdown', async
 
 // 6.x -- health that separates several different questions ------------------
 
+/**
+ * Pin both budgets to zero so health REPORTS without repairing.
+ *
+ * Health deliberately embeds a little now (see `healthBudget`), and on a
+ * two-note fixture it would finish the job and then honestly report itself
+ * complete, which is correct behaviour and the wrong thing for these tests to be
+ * about. Zero isolates the reporting question, and is a real configuration
+ * rather than a test-only hook.
+ */
+async function healthWithoutRepair(loader) {
+  const prevTotal = process.env.SMART_INDEX_EMBED_BUDGET;
+  const prevInteractive = process.env.SMART_INDEX_INTERACTIVE_EMBED_BUDGET;
+  process.env.SMART_INDEX_EMBED_BUDGET = '0';
+  process.env.SMART_INDEX_INTERACTIVE_EMBED_BUDGET = '0';
+  try {
+    return await new SearchEngine(loader).checkSearchHealth();
+  } finally {
+    if (prevTotal === undefined) delete process.env.SMART_INDEX_EMBED_BUDGET;
+    else process.env.SMART_INDEX_EMBED_BUDGET = prevTotal;
+    if (prevInteractive === undefined) delete process.env.SMART_INDEX_INTERACTIVE_EMBED_BUDGET;
+    else process.env.SMART_INDEX_INTERACTIVE_EMBED_BUDGET = prevInteractive;
+  }
+}
+
 test('6.1 health reports four separate facts, and the AND of them', async () => {
   const v = staleVault();
   try {
     const { loader } = await corpusFor(v);
-    const health = await new SearchEngine(loader).checkSearchHealth();
+    const health = await healthWithoutRepair(loader);
 
     for (const field of [
       'semanticReady',
@@ -431,7 +455,7 @@ test('6.2 the verdict says which of the four failed, in words', async () => {
   const v = staleVault();
   try {
     const { loader } = await corpusFor(v);
-    const health = await new SearchEngine(loader).checkSearchHealth();
+    const health = await healthWithoutRepair(loader);
     assert.match(health.verdict, /NOTHING TO SEARCH|CONVERGING|BLIND|DEGRADED|NOT BE VERIFIED/);
     assert.ok(
       !/is current/.test(health.verdict),
@@ -452,6 +476,41 @@ test('6.3 coverage carries the same one field an agent has to read', async () =>
     assert.equal(health.coverage.freshnessVerified, health.freshnessVerified);
     assert.equal(health.coverage.coverageComplete, health.coverageComplete);
     assert.equal(health.coverage.corpusGeneration, health.corpusGeneration);
+  } finally {
+    v.cleanup();
+  }
+});
+
+test('9.2 a brand new brain converges during the health check that was going to run anyway', async () => {
+  // The chicken-and-egg this fixed, found while verifying the fresh-download
+  // path on a real throwaway brain: no vectors meant no probe targets, which
+  // meant no probes ran, which meant nothing got embedded, which meant no
+  // vectors. A brain that had installed itself perfectly reported
+  // "SEARCH HAS NOTHING TO SEARCH" and would have kept reporting it until
+  // somebody happened to run a query.
+  const { embedderAvailable } = await import('../dist/embedder.js');
+  if (!(await embedderAvailable('TaylorAI/bge-micro-v2').catch(() => false))) {
+    console.error('[skip] embedding model unavailable; 9.2 convergence not exercised');
+    return;
+  }
+  const v = makeVault();
+  try {
+    for (let i = 0; i < 3; i++) {
+      v.write(`world${i}.md`, `# World ${i}
+
+A new brain with a little in it, note number ${i}.
+`);
+    }
+    const loader = new SmartConnectionsLoader(v.root);
+    await loader.initialize();
+    const health = await new SearchEngine(loader).checkSearchHealth();
+
+    assert.equal(health.semanticReady, true, 'a small new brain must come up searchable');
+    assert.ok(health.probesRun > 0, 'and it must have something to probe');
+    assert.equal(health.retrievalProbePassed, true);
+    assert.equal(health.coverageComplete, true, 'a job this small is finished, not trickled');
+    assert.equal(health.negativeResultsTrustworthy, true);
+    assert.match(health.verdict, /Search is current/);
   } finally {
     v.cleanup();
   }

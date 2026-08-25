@@ -44,6 +44,12 @@ const STOPWORDS = new Set([
  */
 export const DEFAULT_INTERACTIVE_EMBED_BUDGET = 40;
 
+/**
+ * A pending set at or below this size is finished outright by a health check
+ * rather than trickled. See `healthBudget`.
+ */
+export const SMALL_ENOUGH_TO_FINISH_AT_ONCE = 60;
+
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -700,7 +706,11 @@ export class SearchEngine {
    * inferred from a probe that cannot see it.
    */
   async checkSearchHealth(canaryPath?: string): Promise<SearchHealthReport> {
-    const corpus = await this.corpus.get({ skipIndexing: true });
+    // Reconcile BEFORE choosing the budget, or the first call of a process has
+    // no snapshot to size the job from and takes the small slice on exactly the
+    // brand-new brain that wanted the whole thing.
+    const before = await this.corpus.snapshot();
+    const corpus = await this.corpus.get({ maxEmbeddings: this.healthBudget(before) });
     const coverage = this.buildCoverage('semantic', corpus);
 
     const targets = this.pickProbeTargets(corpus, canaryPath);
@@ -762,6 +772,34 @@ export class SearchEngine {
         probesRun: probes.length,
       }),
     };
+  }
+
+  /**
+   * How much embedding a health check may do.
+   *
+   * It has to do SOME, and this was found the hard way while verifying the
+   * fresh-download path: a brand new brain has no vectors, so there were no
+   * probe targets, so no probes ran, so nothing got embedded, so it still had no
+   * vectors. `check_search_health` on a brain that had installed itself
+   * perfectly reported "SEARCH HAS NOTHING TO SEARCH" forever, and would have
+   * kept reporting it until somebody happened to run a query. Chicken and egg,
+   * and the egg was on the fresh-install path, which is the one that matters
+   * most.
+   *
+   * So the rule is: FINISH the job when the job is small, take a bounded slice
+   * when it is not. A brand new brain is small and converges in seconds during
+   * the check that was going to run anyway. A migrated vault arriving with
+   * hundreds of notes gets the same small slice an interactive query gets, and
+   * an honest verdict telling the agent to call `refresh_search_index`.
+   *
+   * 60 notes is roughly 660 embed calls at this vault's measured 10.6 sections
+   * per note, comfortably inside the 3,000 total.
+   */
+  private healthBudget(state: CorpusState): number {
+    const pending = state.semanticPending.size;
+    return pending <= SMALL_ENOUGH_TO_FINISH_AT_ONCE
+      ? envInt('SMART_INDEX_EMBED_BUDGET', DEFAULT_EMBED_BUDGET)
+      : envInt('SMART_INDEX_INTERACTIVE_EMBED_BUDGET', DEFAULT_INTERACTIVE_EMBED_BUDGET);
   }
 
   /**

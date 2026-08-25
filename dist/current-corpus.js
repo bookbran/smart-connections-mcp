@@ -48,6 +48,10 @@ export class CorpusProvider {
     async snapshot() {
         return this.reconciler.reconcile();
     }
+    /** The last snapshot, without reconciling. Null before the first one. */
+    peek() {
+        return this.reconciler.peek();
+    }
     async get(options = {}) {
         let state = await this.reconciler.reconcile();
         let supplemental;

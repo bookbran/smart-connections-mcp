@@ -92,6 +92,11 @@ export class CorpusProvider {
     return this.reconciler.reconcile();
   }
 
+  /** The last snapshot, without reconciling. Null before the first one. */
+  peek(): CorpusState | null {
+    return this.reconciler.peek();
+  }
+
   async get(options: CorpusOptions = {}): Promise<CurrentCorpus> {
     let state = await this.reconciler.reconcile();
 

@@ -75,6 +75,8 @@ export declare class CorpusProvider {
     constructor(loader: SmartConnectionsLoader, vaultPath: string);
     /** For callers that need only the classification, with no embedding work. */
     snapshot(): Promise<CorpusState>;
+    /** The last snapshot, without reconciling. Null before the first one. */
+    peek(): CorpusState | null;
     get(options?: CorpusOptions): Promise<CurrentCorpus>;
     private assemble;
 }
