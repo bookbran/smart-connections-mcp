@@ -553,7 +553,7 @@ semantic backlog. Migration is also the exact moment a member is most likely to
 arrive carrying a stale `.smart-env` from an Obsidian install they stopped
 opening, which is this bug, pre-installed.
 
-- [ ] **10.1 `MIGRATE.md` wires in search, as a real step.** The migration skill
+- [x] **10.1 `MIGRATE.md` wires in search, as a real step.** The migration skill
   currently ends at frontmatter passes and hands off to name-your-world. Add a
   step after the passes: ensure the bridge is installed and the migrated notes
   are embedded. Written as the agent's job and never the member's.
@@ -564,17 +564,17 @@ opening, which is this bug, pre-installed.
   `dashboard/MIGRATE.md` is Kit material, so the commit needs a
   `KIT-CHANGELOG.md` entry in the same pass or the pre-commit hook refuses it.
 
-- [ ] **10.2 Migration calls `refresh_search_index`**, the resumable bulk path
+- [x] **10.2 Migration calls `refresh_search_index`**, the resumable bulk path
   from 7.3, rather than letting a 660-note backlog trickle in across the
   member's first ten queries.
 
-- [ ] **10.3 An imported `.smart-env` is treated as suspect, not as truth.**
+- [x] **10.3 An imported `.smart-env` is treated as suspect, not as truth.**
   A migrated vault's plugin index is used only where Phase 1 says an entry is
   fresh, exactly like any other, and under the legacy-bootstrap rule that is
   usually nowhere. Fixture: a vault arriving with a populated but months-old
   `.smart-env` must come up with correct search and honest coverage.
 
-- [ ] **10.4 The migration manifest records search state.** `MIGRATE.md`'s
+- [x] **10.4 The migration manifest records search state.** `MIGRATE.md`'s
   contract promises a manifest and reversibility. Record how many notes were
   embedded, how many are pending, and that search converges rather than being
   instantly complete. A member who migrates and immediately searches should not
@@ -638,6 +638,24 @@ contains the fix and executes it.**
 
 ## Progress log
 _(One dated line per item as it ships.)_
+- 2026-08-25: **Phase 10, docs and fixtures.** `MIGRATE.md` gets a real search
+  step: check the bridge, call `refresh_search_index`, call it again while
+  `remaining` is above zero, say where it landed. Written accurately rather than
+  comfortably, per the tracker's own warning: it is a BLOCKING tool call, not a
+  background job, because no durable job lifecycle exists behind it. The imported
+  `.smart-env` paragraph says to do nothing about it, explicitly including do not
+  delete it. The manifest now records search state.
+  **Measured on a real 697-note vault brought in COLD (no index at all): five
+  passes, 165 seconds, 12,639 sections, zero failed, zero raced**, ending at
+  `negativeResultsTrustworthy: true` and "An empty result from this server IS
+  evidence of absence."
+  **A harness mistake worth recording:** the first migration run reported two
+  consecutive rounds with identical numbers, which looked like a convergence bug.
+  It was two of my own verification processes racing on one vault and
+  last-writer-wins on the shared cache file. Not a product bug, and not a
+  supported configuration either, but worth knowing that two concurrent
+  `refresh_search_index` processes against one vault will lose each other's work.
+  Re-run single-process.
 - 2026-08-25: **Phase 9 shipped, and it found two real bugs that no test would
   have.** Verified by booting actual throwaway brains, not by reasoning about it.
   - **9.1/9.3 pinning.** Confirmed first: the zip contains zero bridge files, so
