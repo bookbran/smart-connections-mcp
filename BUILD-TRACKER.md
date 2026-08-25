@@ -625,7 +625,7 @@ contains the fix and executes it.**
   each first. `second-brain-dashboard` has a pre-commit hook requiring a
   `KIT-CHANGELOG.md` entry for changes to staged Kit material.
 
-- [ ] **11.7 Post the final results comment and close.** Interim phase comments
+- [x] **11.7 Post the final results comment and close.** Interim phase comments
   on #138 are welcome throughout; **this is the one that reports results and
   closes.** Include what shipped, live before/after numbers, confirmation that a
   fresh download gets verified search with no manual steps, that existing
@@ -638,6 +638,11 @@ contains the fix and executes it.**
 
 ## Progress log
 _(One dated line per item as it ships.)_
+- 2026-08-25: **11.7 posted, #138 closed. The build is done.**
+  Every box in this tracker is checked. Nothing was left open, and nothing was
+  scaled down: the one thing deliberately not done is Dan's running Astrolabe
+  window, which was left alone rather than restarted, and that is stated in the
+  closing comment rather than quietly skipped.
 - 2026-08-25: **11.5 and 11.6 done, plus one more real bug and a 0.6.1.**
   - **Dan's vault, live:** 697 of 697 searchable, 12,585 sections, 151 seconds
     over 5 passes, zero failed, zero raced. `negativeResultsTrustworthy: true`
