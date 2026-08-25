@@ -1,21 +1,30 @@
 /**
- * Semantic search engine for Smart Connections
+ * Retrieval, and the facts a caller needs to judge it.
+ *
+ * Everything semantic in this file ranks against `CurrentCorpus` and nothing
+ * else. That is the whole architectural point: `search_notes` returning current
+ * results while `get_similar_notes` still answered from the plugin's old
+ * snapshot would be the same bug with a smaller blast radius.
  */
 
 import type {
-  SmartSource, SimilarNote, ConnectionNode, ConnectionGraph, NoteContent,
+  SimilarNote, ConnectionGraph, NoteContent,
   SearchMode, SearchCoverage, SearchResponse, SearchHealthProbe, SearchHealthReport,
+  RefreshReport,
 } from './types.js';
 import { cosineSimilarity, findNearestNeighbors } from './embedding-utils.js';
 import { embedText } from './embedder.js';
-import { buildSupplementalIndex, type SupplementalIndex } from './vault-indexer.js';
+import { CorpusProvider, type CurrentCorpus, type CorpusOptions } from './current-corpus.js';
+import { readCanonicalText, corpusIsClean, type CorpusState } from './corpus-state.js';
+import { canonicalPath } from './canonical-path.js';
+import { DEFAULT_EMBED_BUDGET } from './vault-indexer.js';
 import type { SmartConnectionsLoader } from './smart-connections-loader.js';
 
 function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Common English stopwords dropped from lexical fallback queries.
+// Common English stopwords dropped from lexical queries.
 const STOPWORDS = new Set([
   'the', 'a', 'an', 'and', 'or', 'but', 'of', 'to', 'in', 'on', 'for', 'with',
   'is', 'are', 'was', 'were', 'be', 'been', 'it', 'this', 'that', 'these',
@@ -23,248 +32,151 @@ const STOPWORDS = new Set([
   'who', 'which', 'i', 'you', 'we', 'they', 'do', 'does', 'my', 'our',
 ]);
 
+/**
+ * How many embed calls one interactive query may spend repairing the backlog
+ * (tracker 7.1).
+ *
+ * The 3,000-call total stays; this is the much smaller slice an interactive
+ * query is allowed to take from it. Spending "whatever budget is left" before
+ * returning a query is exactly the multi-minute first query the total cap exists
+ * to prevent, and on a fresh 700-note vault it would mean the member's first
+ * question sits there for minutes while lexical search was ready immediately.
+ */
+export const DEFAULT_INTERACTIVE_EMBED_BUDGET = 40;
+
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 export class SearchEngine {
-  private loader: SmartConnectionsLoader;
-  private embeddingModelKey: string;
-  private supplementalPromise: Promise<SupplementalIndex> | null = null;
+  private readonly corpus: CorpusProvider;
+  private readonly embeddingModelKey: string;
+  /**
+   * Probe results, cached for the process.
+   *
+   * Probes test MACHINERY: can retrieval return a note it is holding a vector
+   * for. Machinery does not change between queries, and re-embedding three
+   * title queries on every search would be a real cost for no new information.
+   * `check_search_health` always re-runs them, so the explicit check is never
+   * answered from a cache.
+   */
+  private probeCache: { passed: boolean; probes: SearchHealthProbe[] } | null = null;
 
-  constructor(loader: SmartConnectionsLoader) {
-    this.loader = loader;
+  constructor(private readonly loader: SmartConnectionsLoader) {
     this.embeddingModelKey = loader.getEmbeddingModelKey();
+    this.corpus = new CorpusProvider(loader, loader.getVaultPath());
   }
 
-  /**
-   * Find similar notes to a given note path
-   */
-  getSimilarNotes(
-    notePath: string,
-    threshold: number = 0.5,
-    limit: number = 10
-  ): SimilarNote[] {
-    const source = this.loader.getSource(notePath);
-
-    if (!source) {
-      throw new Error(`Note not found: ${notePath}`);
-    }
-
-    const embeddings = source.embeddings[this.embeddingModelKey];
-
-    if (!embeddings || !embeddings.vec) {
-      throw new Error(`No embeddings found for note: ${notePath}`);
-    }
-
-    // Build vector dataset from all sources
-    const vectors = Array.from(this.loader.getSources().entries())
-      .filter(([path]) => path !== notePath) // Exclude the query note itself
-      .map(([path, src]) => {
-        const emb = src.embeddings[this.embeddingModelKey];
-        return {
-          id: path,
-          vec: emb?.vec || [],
-          metadata: {
-            blocks: Object.keys(src.blocks || {}),
-            lastModified: src.last_import?.mtime || 0
-          }
-        };
-      })
-      .filter(item => item.vec.length > 0);
-
-    // Find nearest neighbors
-    const neighbors = findNearestNeighbors(
-      embeddings.vec,
-      vectors,
-      limit,
-      threshold
-    );
-
-    // Convert to SimilarNote format
-    return neighbors.map(neighbor => ({
-      path: neighbor.id,
-      similarity: neighbor.similarity,
-      blocks: neighbor.metadata.blocks
-    }));
-  }
+  // -- retrieval ------------------------------------------------------------
 
   /**
-   * Get embedding neighbors for a given embedding vector
-   */
-  getEmbeddingNeighbors(
-    embeddingVector: number[],
-    k: number = 10,
-    threshold: number = 0.5
-  ): SimilarNote[] {
-    // Build vector dataset from all sources
-    const vectors = Array.from(this.loader.getSources().entries())
-      .map(([path, src]) => {
-        const emb = src.embeddings[this.embeddingModelKey];
-        return {
-          id: path,
-          vec: emb?.vec || [],
-          metadata: {
-            blocks: Object.keys(src.blocks || {}),
-            lastModified: src.last_import?.mtime || 0
-          }
-        };
-      })
-      .filter(item => item.vec.length > 0);
-
-    // Find nearest neighbors
-    const neighbors = findNearestNeighbors(
-      embeddingVector,
-      vectors,
-      k,
-      threshold
-    );
-
-    // Convert to SimilarNote format
-    return neighbors.map(neighbor => ({
-      path: neighbor.id,
-      similarity: neighbor.similarity,
-      blocks: neighbor.metadata.blocks
-    }));
-  }
-
-  /**
-   * Build a connection graph starting from a note
-   */
-  getConnectionGraph(
-    notePath: string,
-    depth: number = 2,
-    threshold: number = 0.6,
-    maxPerLevel: number = 5
-  ): ConnectionGraph {
-    const visited = new Set<string>();
-    const flatConnections: Array<{ path: string; depth: number; similarity: number }> = [];
-
-    const buildGraph = (
-      currentPath: string,
-      currentDepth: number,
-      parentSimilarity: number = 1.0
-    ): void => {
-      visited.add(currentPath);
-
-      // Add to flat list (skip root at depth 0)
-      if (currentDepth > 0) {
-        flatConnections.push({
-          path: currentPath,
-          depth: currentDepth,
-          similarity: parentSimilarity
-        });
-      }
-
-      // Stop if we've reached max depth
-      if (currentDepth >= depth) {
-        return;
-      }
-
-      // Find similar notes
-      try {
-        const similar = this.getSimilarNotes(
-          currentPath,
-          threshold,
-          maxPerLevel
-        );
-
-        // Recursively build connections
-        for (const sim of similar) {
-          // Skip already visited nodes to prevent cycles
-          if (!visited.has(sim.path)) {
-            buildGraph(
-              sim.path,
-              currentDepth + 1,
-              sim.similarity
-            );
-          }
-        }
-      } catch (error) {
-        console.error(`Error building graph for ${currentPath}:`, error);
-      }
-    };
-
-    buildGraph(notePath, 0);
-
-    return {
-      root: notePath,
-      connections: flatConnections
-    };
-  }
-
-  /**
-   * Search notes by semantic similarity to a text query.
+   * Semantic search over the vault.
    *
-   * Embeds the query with the same model used for the stored note embeddings
-   * (bge-micro-v2) and ranks notes by cosine similarity. If the embedding model
-   * cannot be loaded (e.g. offline with no cached model), falls back to a
-   * multi-term lexical search so the tool still returns useful results.
-   *
-   * Always returns an envelope naming which engine answered and how much of the
-   * vault it could see. "0 results, semantic, 525 of 525 searched" and "0
-   * results, keyword fallback, 433 of 525 searched" are different facts about
-   * the world, and until now they were the same two characters: `[]`.
+   * Interactive shape, from tracker 7.1: the lexical corpus is the whole vault
+   * and answers immediately, a SMALL bounded number of pending notes get
+   * repaired, and the query returns. It never drains the general backlog
+   * synchronously.
    */
   async searchByQuery(
     queryText: string,
-    limit: number = 10,
-    threshold: number = 0.4
+    limit = 10,
+    threshold = 0.4
   ): Promise<SearchResponse> {
+    const interactiveBudget = envInt(
+      'SMART_INDEX_INTERACTIVE_EMBED_BUDGET',
+      DEFAULT_INTERACTIVE_EMBED_BUDGET
+    );
+
+    // Reconcile first, with no embedding, so the priority order below is
+    // computed from a current picture rather than from directory order.
+    const snapshot = await this.corpus.snapshot();
+    const order = this.repairOrder(snapshot, queryText);
+
+    let corpus: CurrentCorpus;
+    try {
+      corpus = await this.corpus.get({ maxEmbeddings: interactiveBudget, order });
+    } catch (error) {
+      console.error('Corpus unavailable:', error);
+      corpus = await this.corpus.get({ skipIndexing: true });
+    }
+
     try {
       const queryVec = await embedText(queryText, this.embeddingModelKey);
       if (queryVec.length > 0) {
-        // Notes written since Obsidian last indexed are absent from the plugin's
-        // data. Leaving them out means confidently returning the second-best
-        // answer while the best one is invisible, so they are embedded here and
-        // searched alongside. See `vault-indexer`.
-        const supplemental = await this.getSupplementalIndex();
-        const results = this.rankFused(queryVec, queryText, supplemental, limit, threshold);
-        return this.buildResponse('semantic', results, threshold, supplemental);
+        const results = this.rankFused(queryVec, queryText, corpus, limit, threshold);
+        return this.buildResponse('semantic', results, threshold, corpus);
       }
     } catch (error) {
       console.error('Semantic search unavailable, falling back to lexical:', error);
     }
 
-    const results = this.searchByKeyword(queryText, limit, threshold);
-    return this.buildResponse('keyword', results, threshold, null);
+    const results = this.searchByKeyword(queryText, corpus, limit, threshold);
+    return this.buildResponse('keyword', results, threshold, corpus);
+  }
+
+  /**
+   * Which pending notes to repair first (tracker 7.2).
+   *
+   * Directory order means a note edited today waits behind hundreds of unrelated
+   * ones, which is the worst possible ordering: the note a member is asking
+   * about is usually the note they just wrote. Query relevance leads, recency
+   * breaks ties.
+   *
+   * The lexical scan that produces this is free, because reconciliation already
+   * holds the canonical text.
+   */
+  private repairOrder(state: CorpusState, queryText: string): string[] {
+    const pending = Array.from(state.semanticPending);
+    if (pending.length === 0) return pending;
+
+    const terms = tokenize(queryText);
+    const scored = pending.map((path) => {
+      let relevance = 0;
+      if (terms.length) {
+        const text = state.text.get(path);
+        const haystack = ((text ?? '') + '\n' + path).toLowerCase();
+        for (const term of terms) if (haystack.includes(term)) relevance++;
+      }
+      return { path, relevance, mtime: state.onDisk.get(path)?.mtimeMs ?? 0 };
+    });
+
+    scored.sort((a, b) => b.relevance - a.relevance || b.mtime - a.mtime);
+    return scored.map((s) => s.path);
   }
 
   /**
    * Score every note by the best evidence available for it: its whole-note
    * vector, or its closest individual section, whichever matches the query more.
    *
-   * Note vectors are truncated to the embedding model's window, so on a vault of
-   * ordinary multi-thousand-character notes they represent the opening and
-   * nothing after it. Sections are what make the rest reachable. Measured on
-   * Dan's 630-note vault, retrieving a note from a passage of its own body:
-   * recall@1 15% on note vectors, 57% on sections, and the hybrid matched
-   * sections while keeping the note vector's small edge on short title-shaped
-   * queries. Taking the max rather than averaging is deliberate: one strongly
-   * relevant section is a reason to return a note, and averaging it against
-   * unrelated sections in the same note would bury exactly the long, wide-ranging
-   * notes that need this most.
+   * Taking the max rather than averaging is deliberate: one strongly relevant
+   * section is a reason to return a note, and averaging it against unrelated
+   * sections in the same note would bury exactly the long, wide-ranging notes
+   * that need this most.
    *
-   * Sections come from Smart Connections where the plugin has run, and from our
-   * own indexer where it has not, so the two paths produce the same ranking.
+   * Every vector reaching this function has already been vouched for. There is
+   * no freshness check here and there must never be one, or there would be two
+   * implementations of freshness disagreeing about a set.
    */
   private denseScores(
     queryVec: number[],
-    supplemental: SupplementalIndex
+    corpus: CurrentCorpus
   ): Map<string, { score: number; blocks: string[] }> {
     const best = new Map<string, { score: number; blocks: string[] }>();
 
     const offer = (path: string, score: number, blocks: string[]) => {
       const prev = best.get(path);
       if (!prev || score > prev.score) best.set(path, { score, blocks });
-      else if (prev && blocks.length && !prev.blocks.length) prev.blocks = blocks;
+      else if (blocks.length && !prev.blocks.length) prev.blocks = blocks;
     };
 
-    for (const item of this.pluginVectors()) {
-      offer(item.id, cosineSimilarity(queryVec, item.vec), item.metadata.blocks);
-    }
-    for (const [path, vec] of supplemental.vectors) {
-      offer(path, cosineSimilarity(queryVec, vec), []);
+    for (const [path, vec] of corpus.noteVectors) {
+      offer(path, cosineSimilarity(queryVec, vec), corpus.blockHeadings.get(path) ?? []);
     }
 
-    const pluginBlocks = this.loader.getBlockVectors();
-    for (const [path, blocks] of pluginBlocks) {
+    for (const [path, blocks] of corpus.sectionVectors) {
       const headings: string[] = [];
       let top = -1;
       for (const b of blocks) {
@@ -277,14 +189,6 @@ export class SearchEngine {
       }
       if (top > -1) offer(path, top, headings);
     }
-    for (const [path, vecs] of supplemental.sections) {
-      let top = -1;
-      for (const vec of vecs) {
-        const score = cosineSimilarity(queryVec, vec);
-        if (score > top) top = score;
-      }
-      if (top > -1) offer(path, top, []);
-    }
 
     return best;
   }
@@ -292,50 +196,44 @@ export class SearchEngine {
   /**
    * Fuse dense and lexical rankings with Reciprocal Rank Fusion.
    *
-   * Dense retrieval has a structural blind spot that no amount of better
-   * embedding fixes: short literal tokens. An error code, a date, a person's
-   * surname, a config flag, a commit SHA. Those carry almost no semantic signal,
-   * so a vector model has nothing to grip, while a lexical scorer finds them
-   * immediately. The 2026 retrieval literature is consistent that fusing the two
-   * is the single largest post-baseline improvement available, ahead of
-   * reranking and ahead of chunking strategy, because it closes a gap the other
-   * two cannot reach.
+   * Dense retrieval has a structural blind spot no better embedding fixes: short
+   * literal tokens. An error code, a date, a surname, a config flag, a commit
+   * SHA. A vector model has nothing to grip; a lexical scorer finds them
+   * immediately. Fusing the two is the single largest post-baseline improvement
+   * available, ahead of reranking and ahead of chunking strategy.
    *
-   * RRF fuses by RANK rather than score, which is what makes it usable here:
-   * cosine similarity and a term-coverage score live on incompatible scales and
-   * any attempt to normalise them is a tuning exercise that goes stale. Summing
-   * 1/(k + rank) needs no normalisation and rewards notes both retrievers agree
-   * on. k=60 is the value from the original paper and the field default; it
-   * damps the top of each list so one retriever cannot dominate outright.
+   * RRF fuses by RANK rather than score, which is what makes it usable: cosine
+   * similarity and a term-coverage score live on incompatible scales and any
+   * attempt to normalise them is a tuning exercise that goes stale. k=60 is the
+   * value from the original paper.
    *
-   * The reported `similarity` stays the dense cosine, so existing thresholds and
-   * expectations still mean what they meant. `matchedVia` says which retriever
-   * actually found a result, because "this surfaced on a literal term match with
-   * near-zero semantic similarity" is something a caller should be able to see
-   * rather than infer from a confusing score.
+   * Dropping stale vectors matters MOST here, and it is not obvious why. A stale
+   * note still earns a dense rank, just a bad one. Because RRF sums contributions
+   * from both lists, a note appearing in both at mediocre ranks beats a note
+   * appearing only in the lexical list at rank 6. So a stale vector actively
+   * SUPPRESSED the lexical rescue for its own note. Removing it does not just
+   * stop a wrong answer, it restores a fallback path.
    */
   private rankFused(
     queryVec: number[],
     queryText: string,
-    supplemental: SupplementalIndex,
+    corpus: CurrentCorpus,
     limit: number,
     threshold: number
   ): SimilarNote[] {
     const K = 60;
-    const dense = this.denseScores(queryVec, supplemental);
+    const dense = this.denseScores(queryVec, corpus);
 
     const denseRanked = Array.from(dense.entries()).sort((a, b) => b[1].score - a[1].score);
-    // Threshold 0 and a deep cut: fusion needs ranks, and a lexical hit that the
-    // dense side scores poorly is exactly the case this exists to rescue.
-    const lexical = this.searchByKeyword(queryText, 200, 0);
+    // Threshold 0 and a deep cut: fusion needs ranks, and a lexical hit the dense
+    // side scores poorly is exactly the case this exists to rescue.
+    const lexical = this.searchByKeyword(queryText, corpus, 200, 0);
 
     const rrf = new Map<string, number>();
-    const seenDense = new Set<string>();
     const seenLexical = new Set<string>();
 
     denseRanked.forEach(([path], i) => {
       rrf.set(path, (rrf.get(path) ?? 0) + 1 / (K + i + 1));
-      seenDense.add(path);
     });
     lexical.forEach((r, i) => {
       rrf.set(r.path, (rrf.get(r.path) ?? 0) + 1 / (K + i + 1));
@@ -358,71 +256,378 @@ export class SearchEngine {
         return {
           path,
           similarity: d?.score ?? 0,
-          blocks: d?.blocks ?? [],
+          blocks: d?.blocks ?? corpus.blockHeadings.get(path) ?? [],
           matchedVia: semantic && inLex ? 'both' : inLex && !semantic ? 'lexical' : 'semantic',
         } as SimilarNote;
       });
   }
 
-  /** Vector dataset from the notes Smart Connections has already embedded. */
-  private pluginVectors() {
-    return Array.from(this.loader.getSources().entries())
-      .map(([path, src]) => ({
-        id: path,
-        vec: src.embeddings[this.embeddingModelKey]?.vec || [],
-        metadata: {
-          blocks: Object.keys(src.blocks || {}),
-          lastModified: src.last_import?.mtime || 0,
-        },
-      }))
-      .filter((item) => item.vec.length > 0);
+  /**
+   * Literal term matching over EVERY readable note in the vault (tracker 3.1).
+   *
+   * It used to iterate `loader.getSources()`, so a note Smart Connections had
+   * never seen was invisible to the keyword fallback despite sitting on disk.
+   * That made an indexing backlog catastrophic rather than merely slow: during
+   * the window before a note is embedded, it could not be found by ANY path.
+   *
+   * Now the lexical corpus is the whole vault and the semantic corpus is
+   * whatever has a verified-current vector. That difference is exactly what
+   * makes a backlog survivable: a note written thirty seconds ago is findable by
+   * its own words immediately, and becomes findable by meaning once it converges.
+   */
+  searchByKeyword(
+    queryText: string,
+    corpus: CurrentCorpus,
+    limit = 10,
+    threshold = 0.4
+  ): SimilarNote[] {
+    const terms = tokenize(queryText);
+    if (terms.length === 0) return [];
+
+    const results: SimilarNote[] = [];
+    const matchers = terms.map((t) => new RegExp(escapeRegExp(t), 'g'));
+
+    for (const path of corpus.state.onDisk.keys()) {
+      const text = readCanonicalText(corpus.state, path);
+      if (text === null) continue;
+      const haystack = (path + '\n' + text).toLowerCase();
+
+      let matchedTerms = 0;
+      let totalMatches = 0;
+      for (const re of matchers) {
+        re.lastIndex = 0;
+        const count = (haystack.match(re) || []).length;
+        if (count > 0) {
+          matchedTerms++;
+          totalMatches += count;
+        }
+      }
+      if (matchedTerms === 0) continue;
+
+      // Coverage (how many distinct query terms appear) dominates; term
+      // frequency is a light tiebreaker.
+      const coverage = matchedTerms / terms.length;
+      const tfBonus = Math.min(totalMatches / (terms.length * 8), 1);
+      const score = coverage * 0.8 + tfBonus * 0.2;
+      if (score < threshold) continue;
+
+      results.push({
+        path,
+        similarity: score,
+        blocks: corpus.blockHeadings.get(path) ?? [],
+        matchedVia: 'lexical',
+      });
+    }
+
+    return results.sort((a, b) => b.similarity - a.similarity).slice(0, limit);
   }
 
   /**
-   * Wrap results with the facts a caller needs to judge them.
+   * Notes similar to a given note (tracker 5.1, 5.2).
    *
-   * `supplemental` is null on the lexical path, where the on-disk catch-up index
-   * was never built, so the vault total falls back to what the plugin knows and
-   * `unsearchable` stays honest rather than guessing at zero.
+   * Two separate things had to change. The comparison SET now comes from the
+   * current corpus. And so does the QUERY NOTE's own vector, which is the easy
+   * one to miss because it is fetched by a different call path: a note stale in
+   * the plugin but freshly embedded here must be compared using OUR vector, not
+   * the plugin's old one. Answering "what is this note like" from a vector built
+   * out of text the member deleted in June is the same bug in a different tool.
+   *
+   * Async now, because the corpus is reconciled per operation. Worth it.
    */
+  async getSimilarNotes(notePath: string, threshold = 0.5, limit = 10): Promise<SimilarNote[]> {
+    const corpus = await this.corpus.get({ skipIndexing: true });
+    const path = corpus.state.resolvePath(notePath) ?? canonicalPath(notePath);
+
+    if (!corpus.state.onDisk.has(path)) {
+      throw new Error(`Note not found: ${notePath}`);
+    }
+
+    const queryVec = corpus.noteVectors.get(path);
+    if (!queryVec) {
+      const pending = corpus.state.semanticPending.has(path);
+      throw new Error(
+        pending
+          ? `No verified-current embedding for ${notePath} yet. It exists on disk and is ` +
+            'queued for embedding; run refresh_search_index or search for it once to repair it. ' +
+            'Answering from a stale vector would describe a version of this note that no longer exists.'
+          : `No embeddings found for note: ${notePath}`
+      );
+    }
+
+    const vectors = Array.from(corpus.noteVectors.entries())
+      .filter(([p]) => p !== path)
+      .map(([p, vec]) => ({
+        id: p,
+        vec,
+        metadata: { blocks: corpus.blockHeadings.get(p) ?? [] },
+      }));
+
+    return findNearestNeighbors(queryVec, vectors, limit, threshold).map((n) => ({
+      path: n.id,
+      similarity: n.similarity,
+      blocks: n.metadata?.blocks ?? [],
+    }));
+  }
+
+  /** Nearest neighbours for a caller-supplied vector (tracker 5.3). */
+  async getEmbeddingNeighbors(
+    embeddingVector: number[],
+    k = 10,
+    threshold = 0.5
+  ): Promise<SimilarNote[]> {
+    const corpus = await this.corpus.get({ skipIndexing: true });
+    const vectors = Array.from(corpus.noteVectors.entries()).map(([p, vec]) => ({
+      id: p,
+      vec,
+      metadata: { blocks: corpus.blockHeadings.get(p) ?? [] },
+    }));
+    return findNearestNeighbors(embeddingVector, vectors, k, threshold).map((n) => ({
+      path: n.id,
+      similarity: n.similarity,
+      blocks: n.metadata?.blocks ?? [],
+    }));
+  }
+
+  /**
+   * A multi-level connection graph (tracker 5.3).
+   *
+   * Inherits the fix through `getSimilarNotes`, which is the point of having one
+   * corpus rather than a filter per call site. The test proves it rather than
+   * assuming it.
+   */
+  async getConnectionGraph(
+    notePath: string,
+    depth = 2,
+    threshold = 0.6,
+    maxPerLevel = 5
+  ): Promise<ConnectionGraph> {
+    const visited = new Set<string>();
+    const flat: Array<{ path: string; depth: number; similarity: number }> = [];
+
+    const build = async (current: string, currentDepth: number, similarity: number) => {
+      visited.add(current);
+      if (currentDepth > 0) flat.push({ path: current, depth: currentDepth, similarity });
+      if (currentDepth >= depth) return;
+      try {
+        const similar = await this.getSimilarNotes(current, threshold, maxPerLevel);
+        for (const sim of similar) {
+          if (visited.has(sim.path)) continue;
+          await build(sim.path, currentDepth + 1, sim.similarity);
+        }
+      } catch (error) {
+        // A node with no current vector simply does not expand. It is not an
+        // error for the graph as a whole, and it is honest: we cannot say what a
+        // note is like until we have embedded what it currently says.
+        console.error(`Graph node ${current} did not expand:`, error);
+      }
+    };
+
+    const root = (await this.corpus.snapshot()).resolvePath(notePath) ?? canonicalPath(notePath);
+    await build(root, 0, 1.0);
+    return { root, connections: flat };
+  }
+
+  // -- content and stats ----------------------------------------------------
+
+  /**
+   * A note's text, plus the headings that can be trusted for it (tracker 5.5).
+   *
+   * Heading lists come from the plugin's block map, which is a set of
+   * heading-to-line-range pairs recorded when the file was imported. Once the
+   * file changes those coordinates are exactly as suspect as the vectors built
+   * from them, so a stale source contributes nothing and headings are derived
+   * from the current markdown instead. Handing back June's section names for a
+   * file rewritten in August is a small lie that reads as a fact.
+   */
+  async getNoteWithContext(notePath: string): Promise<NoteContent> {
+    const corpus = await this.corpus.get({ skipIndexing: true });
+    const path = corpus.state.resolvePath(notePath) ?? canonicalPath(notePath);
+    const content = this.loader.readNoteContent(corpus.state.onDisk.get(path)?.diskPath ?? path);
+    const blocks = corpus.blockHeadings.get(path) ?? headingsFromMarkdown(content);
+    return { path, content, blocks };
+  }
+
+  /**
+   * Vault-world numbers, not plugin-world (tracker 5.4).
+   *
+   * `totalNotes` used to be `loader.getSources().size`, the size of the INDEX.
+   * On this vault that reported 525 for a 702-note vault and called it the total.
+   */
+  async getStats(): Promise<{
+    vaultNotes: number;
+    pluginSources: number;
+    pluginFresh: number;
+    supplemental: number;
+    semanticSearchable: number;
+    semanticPending: number;
+    totalSections: number;
+    embeddingDimension: number;
+    modelKey: string;
+    corpusGeneration: number;
+    verifiedAt: string;
+  }> {
+    const corpus = await this.corpus.get({ skipIndexing: true });
+    let sections = 0;
+    for (const list of corpus.sectionVectors.values()) sections += list.length;
+    const firstVec = corpus.noteVectors.values().next();
+
+    return {
+      vaultNotes: corpus.state.onDisk.size,
+      pluginSources: this.loader.getSourceCount(),
+      pluginFresh: corpus.state.pluginFresh.size,
+      supplemental: corpus.state.supplementalFresh.size,
+      semanticSearchable: corpus.semanticSearchable.size,
+      semanticPending: corpus.state.semanticPending.size,
+      totalSections: sections,
+      embeddingDimension: firstVec.done ? 0 : firstVec.value.length,
+      modelKey: this.embeddingModelKey,
+      corpusGeneration: corpus.state.generation,
+      verifiedAt: corpus.state.verifiedAt,
+    };
+  }
+
+  // -- bulk repair ----------------------------------------------------------
+
+  /**
+   * Work the backlog deliberately, rather than trickling it through queries
+   * (tracker 7.3).
+   *
+   * Resumable and idempotent, both by construction rather than by bookkeeping:
+   * the pending set is recomputed from disk on every call, so an interruption,
+   * a reboot, a failed embedding call and a second invocation all reduce to the
+   * same thing. Whatever is still pending gets worked; whatever is current is
+   * skipped without an embed call.
+   *
+   * Phase 10 depends on this being real, because a migrated vault arrives with
+   * hundreds of notes at once and a 3,000-call budget.
+   */
+  async refreshSearchIndex(budget?: number): Promise<RefreshReport> {
+    const max = budget ?? envInt('SMART_INDEX_EMBED_BUDGET', DEFAULT_EMBED_BUDGET);
+    const corpus = await this.corpus.get({ maxEmbeddings: max });
+    const s = corpus.supplemental;
+    const coverage = this.buildCoverage('semantic', corpus);
+
+    const summary = coverage.coverageComplete
+      ? `Search is fully caught up: all ${coverage.eligible} eligible notes have a ` +
+        'verified-current vector.'
+      : `${s.newlyEmbedded} notes embedded, ${coverage.semantic.pending} still pending. ` +
+        'Run this again to continue; it picks up where it stopped. Keyword search covers ' +
+        'the pending notes in the meantime.';
+
+    return {
+      attempted: s.attempted,
+      refreshed: s.newlyEmbedded,
+      alreadyCurrent: s.alreadyCurrent,
+      failed: s.failed,
+      remaining: coverage.semantic.pending,
+      raced: s.raced,
+      embedCalls: s.embedCalls,
+      budget: max,
+      corpusGeneration: corpus.state.generation,
+      verifiedAt: corpus.state.verifiedAt,
+      coverageComplete: coverage.coverageComplete,
+      failures: s.failures,
+      summary,
+    };
+  }
+
+  // -- coverage and health --------------------------------------------------
+
   private buildResponse(
     mode: SearchMode,
     results: SimilarNote[],
     threshold: number,
-    supplemental: SupplementalIndex | null
+    corpus: CurrentCorpus
   ): SearchResponse {
-    const coverage = this.buildCoverage(mode, supplemental);
-    const response: SearchResponse = { mode, results, coverage, threshold };
-    const warning = this.coverageWarning(mode, coverage, results.length);
+    const coverage = this.buildCoverage(mode, corpus);
+    const negativeResultsTrustworthy =
+      mode === 'semantic' &&
+      (this.probeCache?.passed ?? false) &&
+      coverage.freshnessVerified &&
+      coverage.coverageComplete;
+
+    const response: SearchResponse = {
+      mode,
+      results,
+      coverage,
+      threshold,
+      negativeResultsTrustworthy,
+    };
+    const warning = this.coverageWarning(mode, coverage, results.length, negativeResultsTrustworthy);
     if (warning) response.warning = warning;
     return response;
   }
 
-  private buildCoverage(
-    mode: SearchMode,
-    supplemental: SupplementalIndex | null
-  ): SearchCoverage {
-    const fromPlugin =
-      mode === 'semantic' ? this.pluginVectors().length : this.loader.getSources().size;
-    const supplementalCount = supplemental ? supplemental.vectors.size : 0;
-    // Sections are the reason a long note is findable at all, so report them
-    // rather than letting "630 of 630 searched" hide a vault with no chunking.
-    let sectionCount = 0;
-    for (const list of this.loader.getBlockVectors().values()) sectionCount += list.length;
-    if (supplemental) {
-      for (const list of supplemental.sections.values()) sectionCount += list.length;
+  /**
+   * Coverage by SET DIFFERENCE, never by adding counts (tracker 4.1).
+   *
+   * `searchable = semanticPaths INTERSECT onDisk`, `pending = eligible MINUS
+   * searchable`. Doing it this way makes three bug classes structurally
+   * impossible rather than merely unlikely: a duplicate path cannot inflate what
+   * was searched, a phantom cannot inflate anything, and plugin/supplemental
+   * overlap cannot make the searched count exceed the vault. The old code added
+   * `fromPlugin + supplemental` and subtracted from a total built out of the same
+   * indexes, which is why it could report `unsearchable: 0` on a vault that was
+   * 97% stale.
+   */
+  private buildCoverage(mode: SearchMode, corpus: CurrentCorpus): SearchCoverage {
+    const state = corpus.state;
+
+    const searchable = new Set<string>();
+    for (const path of corpus.semanticSearchable) {
+      if (state.onDisk.has(path)) searchable.add(path);
     }
-    const searched = fromPlugin + supplementalCount;
-    // Notes the plugin has never seen still exist on disk. Counting them keeps
-    // `vaultTotal` the size of the real vault rather than the size of the index.
-    const vaultTotal = this.loader.getSources().size + (supplemental?.missingFromPlugin ?? 0);
+
+    const pending = new Set<string>();
+    for (const path of state.eligible) if (!searchable.has(path)) pending.add(path);
+
+    let fromPluginFresh = 0;
+    let fromSupplemental = 0;
+    for (const path of searchable) {
+      if (state.supplementalFresh.has(path)) fromSupplemental++;
+      else if (state.pluginFresh.has(path)) fromPluginFresh++;
+    }
+
+    let sections = 0;
+    for (const list of corpus.sectionVectors.values()) sections += list.length;
+
+    // Lexical reads whatever it can read, which is every note minus the ones
+    // that failed to read at all.
+    const lexicalSearchable = state.onDisk.size - state.unreadable.size;
+
+    const freshnessVerified = corpusIsClean(state);
+    const coverageComplete = freshnessVerified && pending.size === 0 && mode === 'semantic';
+
     return {
-      searched,
-      vaultTotal,
-      fromPlugin,
-      supplemental: supplementalCount,
-      sections: sectionCount,
-      unsearchable: Math.max(0, vaultTotal - searched),
+      vaultNotes: state.onDisk.size,
+      eligible: state.eligible.size,
+      ineligible: state.ineligible.size,
+      semantic: {
+        searchable: searchable.size,
+        pending: pending.size,
+        fromPluginFresh,
+        fromSupplemental,
+        sections,
+      },
+      lexical: { searchable: lexicalSearchable },
+      plugin: {
+        sources: this.loader.getSourceCount(),
+        fresh: state.pluginFresh.size,
+        stale: state.pluginStale.size,
+        phantom: state.pluginPhantoms.size,
+        unreadable: state.pluginUnreadable.size,
+      },
+      errors: {
+        inventory: state.errors.inventory.length,
+        read: state.errors.read.length,
+        hash: state.errors.hash.length,
+        embed: state.errors.embed.length,
+        unreadable: state.unreadable.size,
+      },
+      corpusGeneration: state.generation,
+      verifiedAt: state.verifiedAt,
+      freshnessVerified,
+      coverageComplete,
     };
   }
 
@@ -433,9 +638,11 @@ export class SearchEngine {
   private coverageWarning(
     mode: SearchMode,
     coverage: SearchCoverage,
-    resultCount: number
+    resultCount: number,
+    trustworthy: boolean
   ): string | undefined {
     const parts: string[] = [];
+
     if (mode === 'keyword') {
       parts.push(
         'SEARCH IS DEGRADED: the embedding model did not load, so this answer came from ' +
@@ -443,45 +650,68 @@ export class SearchEngine {
           'Do not report an empty or thin result as "the vault has nothing on this."'
       );
     }
-    if (coverage.unsearchable > 0) {
+    if (!coverage.freshnessVerified) {
       parts.push(
-        `${coverage.unsearchable} of ${coverage.vaultTotal} notes could not be searched this run.`
+        `FRESHNESS NOT VERIFIED: ${coverage.errors.inventory} directories, ` +
+          `${coverage.errors.read} reads, ${coverage.errors.hash} hashes and ` +
+          `${coverage.errors.embed} embeddings could not be accounted for, so these ` +
+          'numbers are the best available rather than the truth.'
       );
     }
-    if (resultCount === 0 && parts.length === 0) {
+    if (coverage.semantic.pending > 0) {
       parts.push(
-        `No matches above threshold. This was a full ${mode} search of ` +
-          `${coverage.searched} of ${coverage.vaultTotal} notes, so the vault genuinely ` +
-          'appears to have nothing closer. Lower the threshold to widen recall.'
+        `${coverage.semantic.pending} of ${coverage.eligible} eligible notes have no ` +
+          'verified-current vector yet, so semantic search cannot see them. They ARE ' +
+          'covered by literal keyword matching, which runs over the whole vault, so a ' +
+          'distinctive phrase will still find them.'
       );
     }
-    return parts.length > 0 ? parts.join(' ') : undefined;
+    if (coverage.plugin.stale > 0) {
+      parts.push(
+        `${coverage.plugin.stale} Smart Connections vectors were dropped as stale ` +
+          '(the notes changed after they were embedded). Open Obsidian to let the plugin ' +
+          'catch up, or call refresh_search_index to embed them here.'
+      );
+    }
+    if (resultCount === 0) {
+      parts.push(
+        trustworthy
+          ? `No matches above threshold. This was a full ${mode} search of ` +
+            `${coverage.semantic.searchable} of ${coverage.eligible} eligible notes with ` +
+            'freshness verified, so the vault genuinely appears to have nothing closer. ' +
+            'Lower the threshold to widen recall.'
+          : 'This empty result is NOT evidence of absence. Say "not found in the verified ' +
+            'searchable index," never "absent from the vault," and use grep or a file read ' +
+            'when absence actually matters.'
+      );
+    }
+
+    return parts.length ? parts.join(' ') : undefined;
   }
 
   /**
-   * Positive control: ask for notes we know are there, and see if they come back.
+   * The verdict, split into the questions it was conflating (tracker 6.1, 6.2).
    *
-   * "Did we get results" is the wrong question, because a blind index answers it
-   * the same way an empty topic does. The right question is "did we get the one
-   * we buried on purpose." A canary is only useful because it stops singing.
-   *
-   * Probes are drawn from the live index rather than a planted starter note, so
-   * this works on any vault, including one that has been running for a year.
-   * `canaryPath` pins a specific note when the kit ships one.
+   * The old check asked "did we get results for notes we know are there," drew
+   * the expected notes FROM the live index, and called a pass `alive`. That
+   * tests REACHABILITY of whatever the index holds, and a corpus embedded in June
+   * is perfectly reachable. So the probes are kept and honestly renamed, and
+   * freshness is established mechanically from fingerprints instead of being
+   * inferred from a probe that cannot see it.
    */
   async checkSearchHealth(canaryPath?: string): Promise<SearchHealthReport> {
-    const supplementalForProbes = await this.getSupplementalIndex();
-    const probeTargets = this.pickProbeTargets(supplementalForProbes, canaryPath);
+    const corpus = await this.corpus.get({ skipIndexing: true });
+    const coverage = this.buildCoverage('semantic', corpus);
+
+    const targets = this.pickProbeTargets(corpus, canaryPath);
     const probes: SearchHealthProbe[] = [];
     let mode: SearchMode = 'semantic';
-    let coverage = this.buildCoverage('semantic', await this.getSupplementalIndex());
 
-    for (const target of probeTargets) {
+    for (const target of targets) {
       // Threshold deliberately low: this asks whether the note is reachable at
       // all, not whether it would rank well for a member's real question.
       const response = await this.searchByQuery(target.query, 10, 0.2);
       mode = response.mode;
-      coverage = response.coverage;
       const rank = response.results.findIndex((r) => r.path === target.path);
       probes.push({
         query: target.query,
@@ -493,207 +723,98 @@ export class SearchEngine {
     }
 
     const probesPassed = probes.filter((p) => p.found).length;
-    // Three conditions, because there are three ways to be untrustworthy and
-    // only one of them is "retrieval is completely dead".
-    //   - a clean sweep of probe misses is blindness (one miss is a ranking
-    //     accident, so require a majority rather than a single hit)
-    //   - keyword mode means the embedding model never loaded
-    //   - and a large unsearchable slice means an empty result proves nothing,
-    //     even though the notes it CAN see come back fine. That last case is the
-    //     one that nearly slipped through: with most of the vault missing, the
-    //     probes that happened to land on indexed notes still passed.
+    // A majority rather than a single hit: one miss is a ranking accident, a
+    // clean sweep of misses is blindness.
     const majority = Math.ceil(probes.length / 2);
-    const coverageGap =
-      coverage.vaultTotal > 0 ? coverage.unsearchable / coverage.vaultTotal : 0;
-    const alive =
-      probes.length > 0 &&
-      probesPassed >= majority &&
-      mode === 'semantic' &&
-      coverageGap <= 0.1;
+    const retrievalProbePassed = probes.length > 0 && probesPassed >= majority;
+    this.probeCache = { passed: retrievalProbePassed, probes };
+
+    const semanticReady = mode === 'semantic' && corpus.noteVectors.size > 0;
+    const freshnessVerified = coverage.freshnessVerified;
+    const coverageComplete = coverage.coverageComplete;
+    const negativeResultsTrustworthy =
+      semanticReady && retrievalProbePassed && freshnessVerified && coverageComplete;
 
     return {
-      alive,
+      semanticReady,
+      retrievalProbePassed,
+      freshnessVerified,
+      coverageComplete,
+      negativeResultsTrustworthy,
+      verifiedAt: corpus.state.verifiedAt,
+      corpusGeneration: corpus.state.generation,
+      alive: negativeResultsTrustworthy,
       mode,
       coverage,
       modelKey: this.embeddingModelKey,
       probes,
       probesPassed,
       probesRun: probes.length,
-      verdict: buildVerdict(alive, mode, coverage, probesPassed, probes.length),
+      verdict: buildVerdict({
+        semanticReady,
+        retrievalProbePassed,
+        freshnessVerified,
+        coverageComplete,
+        negativeResultsTrustworthy,
+        mode,
+        coverage,
+        probesPassed,
+        probesRun: probes.length,
+      }),
     };
   }
 
   /**
    * Query a note by its own title. If retrieval cannot find a note when handed
    * that note's title, it cannot find anything.
+   *
+   * Drawn from what the engine can actually RANK, not from the plugin alone:
+   * sampling the plugin made the probe report "no notes are indexed" on a
+   * working plugin-free vault, and a check that cries wolf gets ignored exactly
+   * like one that stays silent when it should not.
    */
   private pickProbeTargets(
-    supplemental: SupplementalIndex,
+    corpus: CurrentCorpus,
     canaryPath?: string
   ): Array<{ path: string; query: string }> {
-    // Every note the engine can actually rank, not only the ones Smart
-    // Connections knows about. Sampling the plugin alone made the canary report
-    // "no notes are indexed" on a working plugin-free vault, which is a false
-    // alarm, and a check that cries wolf gets ignored exactly like one that
-    // stays silent when it should not.
-    const paths = Array.from(
-      new Set([...this.loader.getSources().keys(), ...supplemental.vectors.keys()])
-    );
+    const paths = Array.from(corpus.semanticSearchable);
     if (paths.length === 0) return [];
 
     const chosen: string[] = [];
-    if (canaryPath && paths.includes(canaryPath)) chosen.push(canaryPath);
+    const canary = canaryPath ? corpus.state.resolvePath(canaryPath) : null;
+    if (canary && paths.includes(canary)) chosen.push(canary);
 
-    // Deterministic spread across the vault, so repeated runs are comparable and
-    // one unlucky note cannot flip the verdict on its own.
+    // Deterministic spread, so repeated runs are comparable and one unlucky note
+    // cannot flip the verdict on its own.
     const sorted = [...paths].sort();
     for (const fraction of [0.1, 0.5, 0.9]) {
       const candidate = sorted[Math.floor(sorted.length * fraction)];
       if (candidate && !chosen.includes(candidate)) chosen.push(candidate);
     }
-
     return chosen.map((path) => ({ path, query: titleFromPath(path) }));
-  }
-
-  /**
-   * Lexical fallback: multi-term keyword scoring.
-   *
-   * Unlike the previous implementation, this tokenizes the query into terms
-   * (dropping stopwords) and scores by how many distinct query terms a note
-   * contains (coverage) plus a small term-frequency bonus. This means
-   * multi-word queries like "intake call guide" match notes that contain those
-   * words anywhere, instead of requiring the exact phrase as a literal
-   * substring. Scores are normalized to 0-1 so `threshold` is meaningful.
-   */
-  /**
-   * Built once per server run and reused; the on-disk cache makes a restart cheap.
-   */
-  private async getSupplementalIndex() {
-    if (!this.supplementalPromise) {
-      this.supplementalPromise = buildSupplementalIndex(
-        this.loader.getVaultPath(),
-        new Set(this.loader.getSources().keys())
-      ).catch(() => ({
-        vectors: new Map<string, number[]>(),
-        sections: new Map<string, number[][]>(),
-        newlyEmbedded: 0,
-        missingFromPlugin: 0,
-      }));
-    }
-    return this.supplementalPromise;
-  }
-
-  searchByKeyword(
-    queryText: string,
-    limit: number = 10,
-    threshold: number = 0.4
-  ): SimilarNote[] {
-    const terms = Array.from(
-      new Set(
-        queryText
-          .toLowerCase()
-          .split(/[^a-z0-9]+/)
-          .filter((t) => t.length > 1 && !STOPWORDS.has(t))
-      )
-    );
-
-    if (terms.length === 0) {
-      return [];
-    }
-
-    const results: SimilarNote[] = [];
-
-    for (const [path, source] of this.loader.getSources()) {
-      try {
-        // Include the path/title so filename matches count too.
-        const haystack = (path + '\n' + this.loader.readNoteContent(path)).toLowerCase();
-
-        let matchedTerms = 0;
-        let totalMatches = 0;
-        for (const term of terms) {
-          const count = (haystack.match(new RegExp(escapeRegExp(term), 'g')) || []).length;
-          if (count > 0) {
-            matchedTerms++;
-            totalMatches += count;
-          }
-        }
-
-        if (matchedTerms === 0) continue;
-
-        // Coverage (how many distinct query terms appear) dominates; term
-        // frequency is a light tiebreaker.
-        const coverage = matchedTerms / terms.length;
-        const tfBonus = Math.min(totalMatches / (terms.length * 8), 1);
-        const score = coverage * 0.8 + tfBonus * 0.2;
-
-        if (score >= threshold) {
-          results.push({
-            path,
-            similarity: score,
-            blocks: Object.keys(source.blocks || {}),
-          });
-        }
-      } catch (error) {
-        continue;
-      }
-    }
-
-    return results
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, limit);
-  }
-
-  /**
-   * Get note content with matched blocks highlighted
-   */
-  getNoteWithContext(
-    notePath: string,
-    includeBlocks: string[] = []
-  ): NoteContent {
-    const content = this.loader.readNoteContent(notePath);
-    const source = this.loader.getSource(notePath);
-    const availableBlocks = source ? Object.keys(source.blocks || {}) : [];
-
-    return {
-      path: notePath,
-      content,
-      blocks: availableBlocks
-    };
-  }
-
-  /**
-   * Get statistics about the knowledge base
-   */
-  getStats(): {
-    totalNotes: number;
-    totalBlocks: number;
-    embeddingDimension: number;
-    modelKey: string;
-  } {
-    const sources = this.loader.getSources();
-    let totalBlocks = 0;
-    let embeddingDim = 0;
-
-    for (const source of sources.values()) {
-      totalBlocks += Object.keys(source.blocks || {}).length;
-
-      if (embeddingDim === 0) {
-        const emb = source.embeddings[this.embeddingModelKey];
-        if (emb?.vec) {
-          embeddingDim = emb.vec.length;
-        }
-      }
-    }
-
-    return {
-      totalNotes: sources.size,
-      totalBlocks,
-      embeddingDimension: embeddingDim,
-      modelKey: this.embeddingModelKey
-    };
   }
 }
 
+function tokenize(queryText: string): string[] {
+  return Array.from(
+    new Set(
+      queryText
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((t) => t.length > 1 && !STOPWORDS.has(t))
+    )
+  );
+}
+
+/** Headings a note currently has, read from the note rather than from an index. */
+function headingsFromMarkdown(content: string): string[] {
+  const out: string[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    const m = /^#{1,6}\s+(.*)$/.exec(line);
+    if (m && m[1].trim()) out.push(m[1].trim());
+  }
+  return out;
+}
 
 /** Filename without directories or extension, hyphens and underscores as spaces. */
 function titleFromPath(notePath: string): string {
@@ -701,42 +822,59 @@ function titleFromPath(notePath: string): string {
   return base.replace(/\.md$/i, '').replace(/[-_]+/g, ' ').trim();
 }
 
-function buildVerdict(
-  alive: boolean,
-  mode: SearchMode,
-  coverage: SearchCoverage,
-  passed: number,
-  run: number
-): string {
-  if (run === 0) {
-    return 'SEARCH IS BLIND: no notes are indexed at all, so every query will return nothing.';
-  }
-  if (mode === 'keyword') {
+function buildVerdict(v: {
+  semanticReady: boolean;
+  retrievalProbePassed: boolean;
+  freshnessVerified: boolean;
+  coverageComplete: boolean;
+  negativeResultsTrustworthy: boolean;
+  mode: SearchMode;
+  coverage: SearchCoverage;
+  probesPassed: number;
+  probesRun: number;
+}): string {
+  const c = v.coverage;
+
+  if (v.probesRun === 0 && c.semantic.searchable === 0) {
     return (
-      'SEARCH IS DEGRADED: the embedding model did not load and this server is ' +
-      'answering with literal keyword matching. Empty results from it mean nothing. ' +
-      'Fix the model before trusting any "the vault has nothing on this" answer.'
+      `SEARCH HAS NOTHING TO SEARCH: ${c.vaultNotes} notes are on disk and none has a ` +
+      'verified-current vector yet. Keyword matching still covers the whole vault, so ' +
+      'literal phrases work. Call refresh_search_index to build the semantic index.'
     );
   }
-  if (!alive) {
-    if (coverage.unsearchable > 0 && passed > 0) {
-      return (
-        `SEARCH IS PARTLY BLIND: only ${coverage.searched} of ${coverage.vaultTotal} notes ` +
-        'can be searched, so the notes it does find are real but an empty result proves ' +
-        'nothing. Do not report "the vault has nothing on this" until the index is complete.'
-      );
-    }
+  if (v.mode === 'keyword') {
     return (
-      `SEARCH IS BLIND: ${run} notes were asked for by their own titles and ${run - passed} ` +
-      'did not come back. An empty result from this server cannot currently be trusted.'
+      'SEARCH IS DEGRADED: the embedding model did not load and this server is answering ' +
+      'with literal keyword matching. Empty results from it mean nothing. Fix the model ' +
+      'before trusting any "the vault has nothing on this" answer.'
     );
   }
-  const gap =
-    coverage.unsearchable > 0
-      ? ` ${coverage.unsearchable} of ${coverage.vaultTotal} notes are not searchable yet.`
-      : '';
+  if (!v.retrievalProbePassed) {
+    return (
+      `SEARCH IS BLIND: ${v.probesRun} notes were asked for by their own titles and ` +
+      `${v.probesRun - v.probesPassed} did not come back. An empty result from this server ` +
+      'cannot currently be trusted.'
+    );
+  }
+  if (!v.freshnessVerified) {
+    return (
+      'FRESHNESS COULD NOT BE VERIFIED: some notes could not be read, hashed or classified, ' +
+      'so this server cannot say which vectors match what is on disk. Retrieval works; its ' +
+      'silences do not mean anything yet.'
+    );
+  }
+  if (!v.coverageComplete) {
+    return (
+      `SEARCH IS CONVERGING: ${c.semantic.searchable} of ${c.eligible} eligible notes have a ` +
+      `verified-current vector and ${c.semantic.pending} are still pending. What it finds is ` +
+      'real and current. An empty result proves nothing yet, so do not report "the vault has ' +
+      'nothing on this" until coverageComplete is true. Keyword matching covers the pending ' +
+      'notes meanwhile.'
+    );
+  }
   return (
-    `Search is alive: ${passed} of ${run} planted queries came back, semantic mode, ` +
-    `${coverage.searched} of ${coverage.vaultTotal} notes searchable.${gap}`
+    `Search is current: all ${c.eligible} eligible notes have a verified-current vector, ` +
+    `${v.probesPassed} of ${v.probesRun} probes came back, freshness verified at ` +
+    `${c.verifiedAt}. An empty result from this server IS evidence of absence.`
   );
 }

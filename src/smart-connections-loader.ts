@@ -173,6 +173,21 @@ export class SmartConnectionsLoader {
   }
 
   /**
+   * How many entries the plugin index holds. A COUNT, never evidence about a
+   * note.
+   *
+   * It exists so reporting code does not have to reach for `getSources()`, which
+   * `test/no-raw-corpus-access.test.mjs` forbids in retrieval modules. Note what
+   * this number is not: it is not the size of the vault, and it is not how many
+   * notes are searchable. The boot line used to print it as "Loaded N notes",
+   * which on this vault said 525 for a 702-note vault and was the first place
+   * the index quietly stood in for the world.
+   */
+  getSourceCount(): number {
+    return this.sources.size;
+  }
+
+  /**
    * Get a specific source by path
    */
   getSource(notePath: string): SmartSource | undefined {

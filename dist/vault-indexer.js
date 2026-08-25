@@ -1,129 +1,87 @@
 /**
- * Embedding the notes Smart Connections hasn't got to yet.
+ * Producing the vectors this server owns (tracker 2.1, 2.2).
  *
- * WHY. Smart Connections only re-embeds while Obsidian is open. Anything written
- * since it last ran is absent from `.smart-env`, so semantic search silently
- * skips it: `get_similar_notes` answers "Note not found" and a query search
- * returns the second-best note without ever mentioning that the best one was
- * invisible. That is the same failure shape as a search tool returning `[]`
- * because of a bad threshold. It looks like an answer.
+ * -- What changed, and why it is not a refactor --
  *
- * Now that the server can embed text for queries it can also embed these, so the
- * index no longer depends on remembering to open Obsidian. Results are cached on
- * disk keyed by size and mtime, so a note is embedded once and re-embedded only
- * when it actually changes.
+ * This used to embed "every note the plugin has not indexed", expressed as
+ * `!knownPaths.has(p)`. That predicate answers a question about the INDEX, and
+ * the question that matters is about the NOTE: does this note have a vector
+ * built from the text currently on disk. A note the plugin indexed in June and
+ * the member edited in August passed `knownPaths.has(p)` and was skipped, so its
+ * June vector kept answering queries as if it were current.
  *
- * CHUNKING. This used to embed each note whole, which quietly capped what search
- * could see. `SAFE_CHARS` is 1200, and on a real vault the median note runs
- * several thousand characters, so a note vector represented the opening and
- * nothing else. Measured on Dan's 630-note vault: retrieving a note from a
- * passage in its own body scored recall@1 of 15% on note vectors against 57% on
- * per-section vectors. That gap is not a ranking subtlety, it is most of every
- * long note having no representation at all.
+ * The indexer no longer decides any of that. It consumes `semanticPending` from
+ * the corpus snapshot, which is a set operation against one definition of
+ * freshness rather than a second implementation of it. That is the whole point
+ * of Phase 1 existing first: without it, this file would have grown its own
+ * freshness check and the next tool would have grown a third.
  *
- * So notes are split on markdown headings and each section is embedded
- * separately, which is the same thing Smart Connections does and the actual
- * reason its index is better. The plugin is now a cache of work we can do
- * ourselves rather than a prerequisite for finding anything.
+ * -- The race this closes (tracker 2.2) --
+ *
+ *     read file -> hash A -> begin embedding -> member edits file (content B)
+ *               -> embedding finishes -> vector installed as "current"   WRONG
+ *
+ * Embedding a 700-note vault takes minutes, and a member editing a note during
+ * that window is not an exotic case, it is Tuesday. The fix has two halves:
+ *
+ *   1. Read the content ONCE, canonicalize it, hash THAT SAME TEXT, chunk THAT
+ *      SAME TEXT, embed those chunks. There is exactly one string in play, so
+ *      there is no opportunity to hash one thing and embed another.
+ *   2. Before treating the result as current, read the file again. If its hash
+ *      moved while we were working, the vector is still cached under the hash it
+ *      was actually built from, so it costs nothing and may be useful if the
+ *      member reverts, but it is NOT reported as current and the note stays
+ *      pending.
+ *
+ * The invariant, stated once: a current vector carries the fingerprint of
+ * exactly the content it was built from, and that fingerprint still equals disk.
+ *
+ * -- Chunking --
+ *
+ * Notes are split on markdown headings and each section embedded separately,
+ * mirroring what Smart Connections does and the actual reason its index is
+ * better. A note vector is truncated to the model's window, so on a vault of
+ * ordinary multi-thousand-character notes it represents the opening and nothing
+ * else. Measured on this vault, retrieving a note from a passage in its own
+ * body: recall@1 of 15% on note vectors against 57% on per-section vectors.
  */
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync } from 'fs';
-import { join, relative, sep } from 'path';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { embedText } from './embedder.js';
-const CACHE_FILE = '.smart-env/mcp-supplemental.json';
-/** Mirrors what Smart Connections itself skips, plus our own cache. */
-const SKIP_DIRS = new Set([
-    '.obsidian',
-    '.smart-env',
-    '.git',
-    '.trash',
-    'node_modules',
-    '.stfolder',
-]);
+import { canonicalContentHash, CONTENT_HASH_ALGORITHM } from './content-hash.js';
+import { CHUNKER_VERSION, loadSupplementalCache, saveSupplementalCache, } from './supplemental-store.js';
 /**
- * Bump whenever chunking changes shape. Size and mtime cannot detect it: the
- * file is identical, the chunks derived from it are not, so without this an
- * unchanged note keeps vectors built by the old splitter forever. Learned by
- * shipping a chunker fix that would have reached only the notes Dan happened to
- * edit afterwards.
- */
-const CHUNKER_VERSION = 2;
-export function listMarkdown(root, dir = root, out = []) {
-    let entries;
-    try {
-        entries = readdirSync(dir, { withFileTypes: true });
-    }
-    catch {
-        return out;
-    }
-    for (const e of entries) {
-        if (e.name.startsWith('.') && SKIP_DIRS.has(e.name))
-            continue;
-        const full = join(dir, e.name);
-        if (e.isDirectory()) {
-            if (SKIP_DIRS.has(e.name))
-                continue;
-            listMarkdown(root, full, out);
-        }
-        else if (e.name.toLowerCase().endsWith('.md')) {
-            // Smart Connections keys everything by forward-slashed vault-relative path.
-            out.push(relative(root, full).split(sep).join('/'));
-        }
-    }
-    return out;
-}
-function loadCache(vaultPath) {
-    const p = join(vaultPath, CACHE_FILE);
-    if (!existsSync(p))
-        return {};
-    try {
-        return JSON.parse(readFileSync(p, 'utf-8'));
-    }
-    catch {
-        // A corrupt cache is not worth failing over; re-embedding is merely slower.
-        return {};
-    }
-}
-function saveCache(vaultPath, cache) {
-    try {
-        // On a machine where Smart Connections has never run there is no `.smart-env`
-        // to write into, and without this the cache silently failed to save and every
-        // startup re-embedded the entire vault. That is precisely the no-Obsidian
-        // case this server now supports, so the directory gets created.
-        mkdirSync(join(vaultPath, '.smart-env'), { recursive: true });
-        writeFileSync(join(vaultPath, CACHE_FILE), JSON.stringify(cache), 'utf-8');
-    }
-    catch {
-        // Losing the cache costs time on the next run and nothing else.
-    }
-}
-/**
- * Embed every note the plugin has not indexed. `knownPaths` is what Smart
- * Connections already covers, which we never duplicate.
+ * Budget in EMBED CALLS, not notes, because a note costs one call for itself
+ * plus one per heading section. Measured here at 10.6 sections per note, so a
+ * per-note cap of 2000 quietly became roughly 21,000 calls and the old "about
+ * thirty seconds" promise became minutes, landing on a member's very first
+ * query.
  *
- * `maxEmbeddings` bounds a first run on a vault that has drifted badly, so the
- * first query after a long gap does not hang. It counts embed CALLS rather than
- * notes, because each note also costs one call per heading section. Anything
- * beyond the budget is embedded on the next call, and the shortfall shows up in
- * `coverage.unsearchable` rather than being hidden.
+ * Never widen this as the fix for a backlog. A backlog gets better scheduling
+ * and a deliberate catch-up path; see `refresh_search_index`.
  */
-/**
- * Split a note into heading-delimited sections small enough to embed whole.
- *
- * Mirrors Smart Connections' own granularity (one chunk per heading path) with a
- * hard character ceiling, because a single heading can still hold more prose than
- * the model window and a truncated chunk reintroduces the exact blindness this
- * exists to fix. Oversized sections are split on paragraph boundaries.
- *
- * The note's path rides on every chunk: location and filename carry real topic
- * signal, and a bare section body often does not say what it is about.
- */
+export const DEFAULT_EMBED_BUDGET = 3000;
+export function emptySupplementalIndex() {
+    return {
+        vectors: new Map(),
+        sections: new Map(),
+        attempted: 0,
+        newlyEmbedded: 0,
+        alreadyCurrent: 0,
+        failed: 0,
+        raced: 0,
+        remaining: 0,
+        embedCalls: 0,
+        failures: [],
+    };
+}
 /**
  * Break one block of text into pieces that each fit `budget`.
  *
  * Line-first, because a markdown list is semantically a sequence of lines and
  * cutting between them preserves meaning. Only a single line longer than the
- * whole budget falls through to a character cut, which is rare and is still
- * better than handing the embedder something it will silently truncate.
+ * whole budget falls through to a character cut, which is rare and still better
+ * than handing the embedder something it will silently truncate.
  */
 function hardWrap(text, budget) {
     if (text.length <= budget)
@@ -137,7 +95,7 @@ function hardWrap(text, budget) {
         buf = [];
         size = 0;
     };
-    for (const line of text.split(/\r?\n/)) {
+    for (const line of text.split('\n')) {
         if (line.length > budget) {
             flush();
             for (let i = 0; i < line.length; i += budget)
@@ -152,6 +110,16 @@ function hardWrap(text, budget) {
     flush();
     return out;
 }
+/**
+ * Split a note into heading-delimited sections small enough to embed whole.
+ *
+ * The note's path rides on every chunk: location and filename carry real topic
+ * signal, and a bare section body often does not say what it is about.
+ *
+ * Expects CANONICAL text. The `\r` handling that used to live here is gone
+ * because canonicalization already removed it, and two places normalizing line
+ * endings is two places that can disagree about what was hashed.
+ */
 export function splitIntoSections(relPath, text, maxChars = 1100) {
     const lines = text.split('\n');
     const sections = [];
@@ -163,7 +131,6 @@ export function splitIntoSections(relPath, text, maxChars = 1100) {
         if (body.length < 40)
             return; // too short to carry meaning on its own
         const context = [relPath, ...headingTrail].join(' > ');
-        // Long sections get split on blank lines rather than mid-sentence.
         if (context.length + body.length <= maxChars) {
             sections.push(`${context}\n\n${body}`);
             return;
@@ -180,12 +147,11 @@ export function splitIntoSections(relPath, text, maxChars = 1100) {
         };
         for (const para of body.split(/\n\s*\n/)) {
             // A paragraph can exceed the whole budget on its own, and on this vault it
-            // routinely does: a tracker's phase is forty `- [ ]` lines with no blank
-            // line anywhere, so paragraph splitting returns one 11k-character blob.
-            // Splitting only on blank lines then emitted chunks far larger than the
-            // model window and `embedText` silently truncated them, which is the exact
-            // blindness sections were introduced to remove. Fall through to lines, and
-            // then to a hard character cut, so every chunk provably fits.
+            // routinely does: a tracker phase is forty `- [ ]` lines with no blank line
+            // anywhere, so paragraph splitting returns one 11k-character blob.
+            // Splitting only on blank lines emitted chunks far larger than the model
+            // window and `embedText` silently truncated them, which is the exact
+            // blindness sections were introduced to remove.
             for (const piece of hardWrap(para, budget)) {
                 if (size + piece.length > budget)
                     flushChunk();
@@ -217,90 +183,159 @@ export function splitIntoSections(relPath, text, maxChars = 1100) {
     }
     return sections;
 }
-export async function buildSupplementalIndex(vaultPath, knownPaths, 
-// Budget in EMBED CALLS, not notes, because a note now costs one call for
-// itself plus one per heading section. Measured here at 10.6 sections per note,
-// so a per-note cap of 2000 quietly became roughly 21000 calls and the old
-// "about 30 seconds" promise became minutes. That cost lands on a member's very
-// first query, on the day-one path we are otherwise trying to keep fast.
-//
-// Partial indexing is safe now in a way it was not before: whatever this run
-// does not reach is reported through `coverage.unsearchable` and will flip the
-// health check to PARTLY BLIND, so a short index announces itself rather than
-// looking like a complete one. Work is cached per note, so successive runs pick
-// up where this one stopped and the vault converges over the first few queries.
-maxEmbeddings = 3000) {
-    const cache = loadCache(vaultPath);
-    const vectors = new Map();
-    const sections = new Map();
-    const missing = listMarkdown(vaultPath).filter((p) => !knownPaths.has(p));
-    let newlyEmbedded = 0;
-    let embedCalls = 0;
-    let cacheDirty = false;
-    for (const rel of missing) {
-        let st;
-        try {
-            st = statSync(join(vaultPath, rel));
-        }
-        catch {
+/**
+ * Load every current supplemental vector, and embed as much of the pending set
+ * as the budget allows.
+ *
+ * Note what is NOT here any more: there is no `knownPaths`, no `statSync`, no
+ * size comparison and no mtime comparison. Freshness arrives already decided.
+ */
+export async function buildSupplementalIndex(vaultPath, state, options = {}) {
+    const maxEmbeddings = options.maxEmbeddings ?? DEFAULT_EMBED_BUDGET;
+    const cache = loadSupplementalCache(vaultPath);
+    const result = emptySupplementalIndex();
+    // Everything the snapshot already verified. No I/O, no decisions.
+    for (const path of state.supplementalFresh) {
+        const entry = cache.entries[path];
+        if (!entry)
             continue;
-        }
-        const cached = cache[rel];
-        // `sections === undefined` means the entry predates chunking. Reusing it
-        // would leave those notes represented by their truncated opening forever,
-        // since an unchanged file never invalidates on size or mtime. Treat a
-        // section-less entry as stale, not as a hit.
-        const cacheUsable = cached &&
-            cached.size === st.size &&
-            cached.mtime === st.mtimeMs &&
-            cached.sections !== undefined &&
-            cached.chunker === CHUNKER_VERSION;
-        if (cacheUsable) {
-            vectors.set(rel, cached.vec);
-            if (cached.sections && cached.sections.length)
-                sections.set(rel, cached.sections);
-            continue;
-        }
-        if (embedCalls >= maxEmbeddings)
-            continue;
-        let text;
-        try {
-            text = readFileSync(join(vaultPath, rel), 'utf-8');
-        }
-        catch {
-            continue;
-        }
-        if (text.trim().length < 50)
-            continue;
-        // `embedQuery` owns truncation, since only it knows the model's real limit
-        // and it steps the budget down if a note tokenizes densely. The path goes in
-        // ahead of the body because a note's location and filename say a lot about
-        // its topic, and the opening carries the rest.
-        const vec = await embedText(`${rel}\n\n${text}`);
-        if (!vec)
-            break; // Model unavailable; leave the rest for a later run.
-        embedCalls++;
-        // Sections are what make the body of a long note reachable; the whole-note
-        // vector above only ever represents its opening. A note is finished once
-        // started rather than half-sectioned, so the budget is checked per note and
-        // a note never lands in the cache with a partial section list.
-        const sectionVecs = [];
-        for (const section of splitIntoSections(rel, text)) {
-            const sv = await embedText(section);
-            if (!sv)
-                break;
-            sectionVecs.push(sv);
-            embedCalls++;
-        }
-        vectors.set(rel, vec);
-        if (sectionVecs.length)
-            sections.set(rel, sectionVecs);
-        cache[rel] = { vec, sections: sectionVecs, chunker: CHUNKER_VERSION, size: st.size, mtime: st.mtimeMs };
-        newlyEmbedded++;
-        cacheDirty = true;
+        result.vectors.set(path, entry.vec);
+        if (entry.sections.length)
+            result.sections.set(path, entry.sections);
+        result.alreadyCurrent++;
     }
+    const pending = options.order?.length
+        ? options.order.filter((p) => state.semanticPending.has(p))
+        : Array.from(state.semanticPending);
+    let cacheDirty = false;
+    let reached = 0;
+    for (const path of pending) {
+        if (result.embedCalls >= maxEmbeddings)
+            break;
+        reached++;
+        result.attempted++;
+        const entry = state.onDisk.get(path);
+        if (!entry)
+            continue;
+        const outcome = await embedOne(vaultPath, entry.diskPath, path, cache, maxEmbeddings - result.embedCalls);
+        result.embedCalls += outcome.embedCalls;
+        if (outcome.status === 'failed') {
+            result.failed++;
+            result.failures.push({ path, message: outcome.message });
+            options.onFailure?.(path, outcome.message);
+            if (outcome.fatal)
+                break; // model is gone; the rest of this run is pointless
+            continue;
+        }
+        cacheDirty = true;
+        result.newlyEmbedded++;
+        options.onSuccess?.(path);
+        if (outcome.status === 'raced') {
+            // Cached under the hash it was built from, so the next reconciliation sees
+            // it as stale and re-embeds. Deliberately NOT reported as current.
+            result.raced++;
+            continue;
+        }
+        result.vectors.set(path, outcome.vec);
+        if (outcome.sections.length)
+            result.sections.set(path, outcome.sections);
+    }
+    result.remaining = Math.max(0, pending.length - reached);
     if (cacheDirty)
-        saveCache(vaultPath, cache);
-    return { vectors, sections, newlyEmbedded, missingFromPlugin: missing.length };
+        saveSupplementalCache(vaultPath, cache);
+    return result;
+}
+/**
+ * Embed one note, binding the vector to the exact content instance that produced
+ * it.
+ *
+ * The ordering here is the whole safety argument, so it is written out rather
+ * than left to be inferred: read once, canonicalize that string, hash that
+ * canonical string, chunk that same canonical string, embed those chunks, then
+ * re-read and compare before calling any of it current.
+ */
+async function embedOne(vaultPath, diskPath, canonicalKey, cache, remainingBudget) {
+    const abs = join(vaultPath, diskPath);
+    let raw;
+    try {
+        raw = readFileSync(abs, 'utf-8');
+    }
+    catch (e) {
+        return {
+            status: 'failed',
+            message: e instanceof Error ? e.message : String(e),
+            fatal: false,
+            embedCalls: 0,
+        };
+    }
+    const { canonical, hash } = canonicalContentHash(raw);
+    let embedCalls = 0;
+    // `embedText` owns truncation, since only it knows the model's real limit and
+    // it steps the budget down if a note tokenizes densely. The path goes in ahead
+    // of the body because a note's location and filename say a lot about its
+    // topic, and the opening carries the rest.
+    let vec;
+    try {
+        vec = await embedText(`${canonicalKey}\n\n${canonical}`);
+    }
+    catch (e) {
+        return {
+            status: 'failed',
+            message: e instanceof Error ? e.message : String(e),
+            fatal: true,
+            embedCalls,
+        };
+    }
+    if (!vec.length) {
+        return { status: 'failed', message: 'embedding model returned nothing', fatal: true, embedCalls };
+    }
+    embedCalls++;
+    // A note is finished once started rather than half-sectioned, so a note never
+    // lands in the cache with a partial section list. The budget is checked per
+    // note, not per section.
+    const sections = [];
+    for (const section of splitIntoSections(canonicalKey, canonical)) {
+        if (embedCalls >= remainingBudget && sections.length > 0)
+            break;
+        let sv;
+        try {
+            sv = await embedText(section);
+        }
+        catch (e) {
+            return {
+                status: 'failed',
+                message: e instanceof Error ? e.message : String(e),
+                fatal: true,
+                embedCalls,
+            };
+        }
+        if (!sv.length)
+            break;
+        sections.push(sv);
+        embedCalls++;
+    }
+    cache.entries[canonicalKey] = {
+        vec,
+        sections,
+        chunker: CHUNKER_VERSION,
+        contentHash: hash,
+        contentHashAlgorithm: CONTENT_HASH_ALGORITHM,
+        embeddedAt: Date.now(),
+    };
+    // The second half of closing the race. Embedding a vault takes minutes and a
+    // member editing a note during that window is ordinary.
+    let after;
+    try {
+        after = readFileSync(abs, 'utf-8');
+    }
+    catch {
+        // Deleted or locked mid-run. The cache entry is still correct about what it
+        // was built from; it simply is not current.
+        return { status: 'raced', embedCalls };
+    }
+    if (canonicalContentHash(after).hash !== hash) {
+        return { status: 'raced', embedCalls };
+    }
+    return { status: 'current', vec, sections, embedCalls };
 }
 //# sourceMappingURL=vault-indexer.js.map

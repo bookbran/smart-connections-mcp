@@ -41,10 +41,10 @@
  * from being true. Same philosophy as not letting the health check grade its own
  * homework.
  */
-import { readdirSync, statSync, promises as fsp } from 'fs';
+import { readdirSync, readFileSync, statSync, promises as fsp } from 'fs';
 import { join, relative, sep } from 'path';
 import { canonicalPath, caseFold, isMarkdownPath } from './canonical-path.js';
-import { CONTENT_HASH_ALGORITHM, canonicalContentHash } from './content-hash.js';
+import { CONTENT_HASH_ALGORITHM, canonicalContentHash, canonicalizeMarkdown } from './content-hash.js';
 import { verifyPluginSource } from './smart-connections-hash.js';
 import { loadSupplementalCache, entryIsCurrent } from './supplemental-store.js';
 /** Mirrors what Smart Connections itself skips, plus our own bookkeeping. */
@@ -170,6 +170,33 @@ export function corpusIsClean(state) {
 }
 /** How many files are read at once during reconciliation. */
 const READ_CONCURRENCY = 24;
+/**
+ * How much canonical text a snapshot keeps in memory for lexical search.
+ *
+ * 64M characters covers a vault far larger than any this has run on. Past it,
+ * notes are re-read on demand: slower, never less complete. A retrieval corpus
+ * that silently shrank to fit a memory budget would be the same class of lie as
+ * the one being fixed.
+ */
+const TEXT_CACHE_BUDGET_CHARS = 64 * 1024 * 1024;
+/**
+ * Canonical text for a note: from the snapshot when it is held, from disk when
+ * it is not. Returns null only when the note cannot be read at all.
+ */
+export function readCanonicalText(state, path) {
+    const held = state.text.get(path);
+    if (held !== undefined)
+        return held;
+    const entry = state.onDisk.get(path);
+    if (!entry)
+        return null;
+    try {
+        return canonicalizeMarkdown(readFileSync(join(state.vaultPath, entry.diskPath), 'utf-8'));
+    }
+    catch {
+        return null;
+    }
+}
 async function mapWithConcurrency(items, limit, fn) {
     let next = 0;
     const width = Math.max(1, Math.min(limit, items.length));
@@ -245,6 +272,8 @@ export class CorpusReconciler {
             contentHashAlgorithm: CONTENT_HASH_ALGORITHM,
             onDisk: new Map(),
             contentHashes: new Map(),
+            text: new Map(),
+            resolvePath: (rawPath) => inventory.resolve(rawPath),
             eligible: new Set(),
             ineligible: new Set(),
             pluginFresh: new Set(),
@@ -265,6 +294,7 @@ export class CorpusReconciler {
         };
         for (const entry of inventory.values())
             state.onDisk.set(entry.path, entry);
+        let textBytes = 0;
         // Plugin sources, re-keyed onto disk spelling. A source whose path resolves
         // to nothing on disk is a phantom: the note was deleted or renamed and the
         // index still carries its vector. Nine of these were sitting in this vault
@@ -321,6 +351,10 @@ export class CorpusReconciler {
                 return;
             }
             state.contentHashes.set(entry.path, hash);
+            if (textBytes + canonical.length <= TEXT_CACHE_BUDGET_CHARS) {
+                state.text.set(entry.path, canonical);
+                textBytes += canonical.length;
+            }
             if (canonical.trim().length < MIN_EMBEDDABLE_CHARS) {
                 state.ineligible.add(entry.path);
             }

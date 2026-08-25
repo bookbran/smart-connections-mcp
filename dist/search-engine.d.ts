@@ -1,94 +1,191 @@
 /**
- * Semantic search engine for Smart Connections
+ * Retrieval, and the facts a caller needs to judge it.
+ *
+ * Everything semantic in this file ranks against `CurrentCorpus` and nothing
+ * else. That is the whole architectural point: `search_notes` returning current
+ * results while `get_similar_notes` still answered from the plugin's old
+ * snapshot would be the same bug with a smaller blast radius.
  */
-import type { SimilarNote, ConnectionGraph, NoteContent, SearchResponse, SearchHealthReport } from './types.js';
+import type { SimilarNote, ConnectionGraph, NoteContent, SearchResponse, SearchHealthReport, RefreshReport } from './types.js';
+import { type CurrentCorpus } from './current-corpus.js';
 import type { SmartConnectionsLoader } from './smart-connections-loader.js';
+/**
+ * How many embed calls one interactive query may spend repairing the backlog
+ * (tracker 7.1).
+ *
+ * The 3,000-call total stays; this is the much smaller slice an interactive
+ * query is allowed to take from it. Spending "whatever budget is left" before
+ * returning a query is exactly the multi-minute first query the total cap exists
+ * to prevent, and on a fresh 700-note vault it would mean the member's first
+ * question sits there for minutes while lexical search was ready immediately.
+ */
+export declare const DEFAULT_INTERACTIVE_EMBED_BUDGET = 40;
 export declare class SearchEngine {
-    private loader;
-    private embeddingModelKey;
-    private supplementalPromise;
+    private readonly loader;
+    private readonly corpus;
+    private readonly embeddingModelKey;
+    /**
+     * Probe results, cached for the process.
+     *
+     * Probes test MACHINERY: can retrieval return a note it is holding a vector
+     * for. Machinery does not change between queries, and re-embedding three
+     * title queries on every search would be a real cost for no new information.
+     * `check_search_health` always re-runs them, so the explicit check is never
+     * answered from a cache.
+     */
+    private probeCache;
     constructor(loader: SmartConnectionsLoader);
     /**
-     * Find similar notes to a given note path
-     */
-    getSimilarNotes(notePath: string, threshold?: number, limit?: number): SimilarNote[];
-    /**
-     * Get embedding neighbors for a given embedding vector
-     */
-    getEmbeddingNeighbors(embeddingVector: number[], k?: number, threshold?: number): SimilarNote[];
-    /**
-     * Build a connection graph starting from a note
-     */
-    getConnectionGraph(notePath: string, depth?: number, threshold?: number, maxPerLevel?: number): ConnectionGraph;
-    /**
-     * Search notes by semantic similarity to a text query.
+     * Semantic search over the vault.
      *
-     * Embeds the query with the same model used for the stored note embeddings
-     * (bge-micro-v2) and ranks notes by cosine similarity. If the embedding model
-     * cannot be loaded (e.g. offline with no cached model), falls back to a
-     * multi-term lexical search so the tool still returns useful results.
-     *
-     * Always returns an envelope naming which engine answered and how much of the
-     * vault it could see. "0 results, semantic, 525 of 525 searched" and "0
-     * results, keyword fallback, 433 of 525 searched" are different facts about
-     * the world, and until now they were the same two characters: `[]`.
+     * Interactive shape, from tracker 7.1: the lexical corpus is the whole vault
+     * and answers immediately, a SMALL bounded number of pending notes get
+     * repaired, and the query returns. It never drains the general backlog
+     * synchronously.
      */
     searchByQuery(queryText: string, limit?: number, threshold?: number): Promise<SearchResponse>;
+    /**
+     * Which pending notes to repair first (tracker 7.2).
+     *
+     * Directory order means a note edited today waits behind hundreds of unrelated
+     * ones, which is the worst possible ordering: the note a member is asking
+     * about is usually the note they just wrote. Query relevance leads, recency
+     * breaks ties.
+     *
+     * The lexical scan that produces this is free, because reconciliation already
+     * holds the canonical text.
+     */
+    private repairOrder;
     /**
      * Score every note by the best evidence available for it: its whole-note
      * vector, or its closest individual section, whichever matches the query more.
      *
-     * Note vectors are truncated to the embedding model's window, so on a vault of
-     * ordinary multi-thousand-character notes they represent the opening and
-     * nothing after it. Sections are what make the rest reachable. Measured on
-     * Dan's 630-note vault, retrieving a note from a passage of its own body:
-     * recall@1 15% on note vectors, 57% on sections, and the hybrid matched
-     * sections while keeping the note vector's small edge on short title-shaped
-     * queries. Taking the max rather than averaging is deliberate: one strongly
-     * relevant section is a reason to return a note, and averaging it against
-     * unrelated sections in the same note would bury exactly the long, wide-ranging
-     * notes that need this most.
+     * Taking the max rather than averaging is deliberate: one strongly relevant
+     * section is a reason to return a note, and averaging it against unrelated
+     * sections in the same note would bury exactly the long, wide-ranging notes
+     * that need this most.
      *
-     * Sections come from Smart Connections where the plugin has run, and from our
-     * own indexer where it has not, so the two paths produce the same ranking.
+     * Every vector reaching this function has already been vouched for. There is
+     * no freshness check here and there must never be one, or there would be two
+     * implementations of freshness disagreeing about a set.
      */
     private denseScores;
     /**
      * Fuse dense and lexical rankings with Reciprocal Rank Fusion.
      *
-     * Dense retrieval has a structural blind spot that no amount of better
-     * embedding fixes: short literal tokens. An error code, a date, a person's
-     * surname, a config flag, a commit SHA. Those carry almost no semantic signal,
-     * so a vector model has nothing to grip, while a lexical scorer finds them
-     * immediately. The 2026 retrieval literature is consistent that fusing the two
-     * is the single largest post-baseline improvement available, ahead of
-     * reranking and ahead of chunking strategy, because it closes a gap the other
-     * two cannot reach.
+     * Dense retrieval has a structural blind spot no better embedding fixes: short
+     * literal tokens. An error code, a date, a surname, a config flag, a commit
+     * SHA. A vector model has nothing to grip; a lexical scorer finds them
+     * immediately. Fusing the two is the single largest post-baseline improvement
+     * available, ahead of reranking and ahead of chunking strategy.
      *
-     * RRF fuses by RANK rather than score, which is what makes it usable here:
-     * cosine similarity and a term-coverage score live on incompatible scales and
-     * any attempt to normalise them is a tuning exercise that goes stale. Summing
-     * 1/(k + rank) needs no normalisation and rewards notes both retrievers agree
-     * on. k=60 is the value from the original paper and the field default; it
-     * damps the top of each list so one retriever cannot dominate outright.
+     * RRF fuses by RANK rather than score, which is what makes it usable: cosine
+     * similarity and a term-coverage score live on incompatible scales and any
+     * attempt to normalise them is a tuning exercise that goes stale. k=60 is the
+     * value from the original paper.
      *
-     * The reported `similarity` stays the dense cosine, so existing thresholds and
-     * expectations still mean what they meant. `matchedVia` says which retriever
-     * actually found a result, because "this surfaced on a literal term match with
-     * near-zero semantic similarity" is something a caller should be able to see
-     * rather than infer from a confusing score.
+     * Dropping stale vectors matters MOST here, and it is not obvious why. A stale
+     * note still earns a dense rank, just a bad one. Because RRF sums contributions
+     * from both lists, a note appearing in both at mediocre ranks beats a note
+     * appearing only in the lexical list at rank 6. So a stale vector actively
+     * SUPPRESSED the lexical rescue for its own note. Removing it does not just
+     * stop a wrong answer, it restores a fallback path.
      */
     private rankFused;
-    /** Vector dataset from the notes Smart Connections has already embedded. */
-    private pluginVectors;
     /**
-     * Wrap results with the facts a caller needs to judge them.
+     * Literal term matching over EVERY readable note in the vault (tracker 3.1).
      *
-     * `supplemental` is null on the lexical path, where the on-disk catch-up index
-     * was never built, so the vault total falls back to what the plugin knows and
-     * `unsearchable` stays honest rather than guessing at zero.
+     * It used to iterate `loader.getSources()`, so a note Smart Connections had
+     * never seen was invisible to the keyword fallback despite sitting on disk.
+     * That made an indexing backlog catastrophic rather than merely slow: during
+     * the window before a note is embedded, it could not be found by ANY path.
+     *
+     * Now the lexical corpus is the whole vault and the semantic corpus is
+     * whatever has a verified-current vector. That difference is exactly what
+     * makes a backlog survivable: a note written thirty seconds ago is findable by
+     * its own words immediately, and becomes findable by meaning once it converges.
      */
+    searchByKeyword(queryText: string, corpus: CurrentCorpus, limit?: number, threshold?: number): SimilarNote[];
+    /**
+     * Notes similar to a given note (tracker 5.1, 5.2).
+     *
+     * Two separate things had to change. The comparison SET now comes from the
+     * current corpus. And so does the QUERY NOTE's own vector, which is the easy
+     * one to miss because it is fetched by a different call path: a note stale in
+     * the plugin but freshly embedded here must be compared using OUR vector, not
+     * the plugin's old one. Answering "what is this note like" from a vector built
+     * out of text the member deleted in June is the same bug in a different tool.
+     *
+     * Async now, because the corpus is reconciled per operation. Worth it.
+     */
+    getSimilarNotes(notePath: string, threshold?: number, limit?: number): Promise<SimilarNote[]>;
+    /** Nearest neighbours for a caller-supplied vector (tracker 5.3). */
+    getEmbeddingNeighbors(embeddingVector: number[], k?: number, threshold?: number): Promise<SimilarNote[]>;
+    /**
+     * A multi-level connection graph (tracker 5.3).
+     *
+     * Inherits the fix through `getSimilarNotes`, which is the point of having one
+     * corpus rather than a filter per call site. The test proves it rather than
+     * assuming it.
+     */
+    getConnectionGraph(notePath: string, depth?: number, threshold?: number, maxPerLevel?: number): Promise<ConnectionGraph>;
+    /**
+     * A note's text, plus the headings that can be trusted for it (tracker 5.5).
+     *
+     * Heading lists come from the plugin's block map, which is a set of
+     * heading-to-line-range pairs recorded when the file was imported. Once the
+     * file changes those coordinates are exactly as suspect as the vectors built
+     * from them, so a stale source contributes nothing and headings are derived
+     * from the current markdown instead. Handing back June's section names for a
+     * file rewritten in August is a small lie that reads as a fact.
+     */
+    getNoteWithContext(notePath: string): Promise<NoteContent>;
+    /**
+     * Vault-world numbers, not plugin-world (tracker 5.4).
+     *
+     * `totalNotes` used to be `loader.getSources().size`, the size of the INDEX.
+     * On this vault that reported 525 for a 702-note vault and called it the total.
+     */
+    getStats(): Promise<{
+        vaultNotes: number;
+        pluginSources: number;
+        pluginFresh: number;
+        supplemental: number;
+        semanticSearchable: number;
+        semanticPending: number;
+        totalSections: number;
+        embeddingDimension: number;
+        modelKey: string;
+        corpusGeneration: number;
+        verifiedAt: string;
+    }>;
+    /**
+     * Work the backlog deliberately, rather than trickling it through queries
+     * (tracker 7.3).
+     *
+     * Resumable and idempotent, both by construction rather than by bookkeeping:
+     * the pending set is recomputed from disk on every call, so an interruption,
+     * a reboot, a failed embedding call and a second invocation all reduce to the
+     * same thing. Whatever is still pending gets worked; whatever is current is
+     * skipped without an embed call.
+     *
+     * Phase 10 depends on this being real, because a migrated vault arrives with
+     * hundreds of notes at once and a 3,000-call budget.
+     */
+    refreshSearchIndex(budget?: number): Promise<RefreshReport>;
     private buildResponse;
+    /**
+     * Coverage by SET DIFFERENCE, never by adding counts (tracker 4.1).
+     *
+     * `searchable = semanticPaths INTERSECT onDisk`, `pending = eligible MINUS
+     * searchable`. Doing it this way makes three bug classes structurally
+     * impossible rather than merely unlikely: a duplicate path cannot inflate what
+     * was searched, a phantom cannot inflate anything, and plugin/supplemental
+     * overlap cannot make the searched count exceed the vault. The old code added
+     * `fromPlugin + supplemental` and subtracted from a total built out of the same
+     * indexes, which is why it could report `unsearchable: 0` on a vault that was
+     * 97% stale.
+     */
     private buildCoverage;
     /**
      * The loud part. A caller that ignores everything else should still not be
@@ -96,49 +193,25 @@ export declare class SearchEngine {
      */
     private coverageWarning;
     /**
-     * Positive control: ask for notes we know are there, and see if they come back.
+     * The verdict, split into the questions it was conflating (tracker 6.1, 6.2).
      *
-     * "Did we get results" is the wrong question, because a blind index answers it
-     * the same way an empty topic does. The right question is "did we get the one
-     * we buried on purpose." A canary is only useful because it stops singing.
-     *
-     * Probes are drawn from the live index rather than a planted starter note, so
-     * this works on any vault, including one that has been running for a year.
-     * `canaryPath` pins a specific note when the kit ships one.
+     * The old check asked "did we get results for notes we know are there," drew
+     * the expected notes FROM the live index, and called a pass `alive`. That
+     * tests REACHABILITY of whatever the index holds, and a corpus embedded in June
+     * is perfectly reachable. So the probes are kept and honestly renamed, and
+     * freshness is established mechanically from fingerprints instead of being
+     * inferred from a probe that cannot see it.
      */
     checkSearchHealth(canaryPath?: string): Promise<SearchHealthReport>;
     /**
      * Query a note by its own title. If retrieval cannot find a note when handed
      * that note's title, it cannot find anything.
+     *
+     * Drawn from what the engine can actually RANK, not from the plugin alone:
+     * sampling the plugin made the probe report "no notes are indexed" on a
+     * working plugin-free vault, and a check that cries wolf gets ignored exactly
+     * like one that stays silent when it should not.
      */
     private pickProbeTargets;
-    /**
-     * Lexical fallback: multi-term keyword scoring.
-     *
-     * Unlike the previous implementation, this tokenizes the query into terms
-     * (dropping stopwords) and scores by how many distinct query terms a note
-     * contains (coverage) plus a small term-frequency bonus. This means
-     * multi-word queries like "intake call guide" match notes that contain those
-     * words anywhere, instead of requiring the exact phrase as a literal
-     * substring. Scores are normalized to 0-1 so `threshold` is meaningful.
-     */
-    /**
-     * Built once per server run and reused; the on-disk cache makes a restart cheap.
-     */
-    private getSupplementalIndex;
-    searchByKeyword(queryText: string, limit?: number, threshold?: number): SimilarNote[];
-    /**
-     * Get note content with matched blocks highlighted
-     */
-    getNoteWithContext(notePath: string, includeBlocks?: string[]): NoteContent;
-    /**
-     * Get statistics about the knowledge base
-     */
-    getStats(): {
-        totalNotes: number;
-        totalBlocks: number;
-        embeddingDimension: number;
-        modelKey: string;
-    };
 }
 //# sourceMappingURL=search-engine.d.ts.map

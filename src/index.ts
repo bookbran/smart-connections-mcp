@@ -47,7 +47,14 @@ function getLinkGraph(): LinkGraph {
 
 console.error('Smart Connections MCP Server initialized successfully');
 console.error(`Vault: ${VAULT_PATH}`);
-console.error(`Loaded ${loader.getSources().size} notes`);
+// Deliberately NOT "loaded N notes". This is the size of the Smart Connections
+// index, which is not the size of the vault and not how many notes are
+// searchable. Printing it as a note count is the same substitution this whole
+// build exists to remove, in a log line.
+console.error(
+  `Smart Connections index: ${loader.getSourceCount()} entries ` +
+    '(each one checked against disk before it is trusted)'
+);
 
 // Create MCP server
 const server = new Server(
@@ -90,7 +97,6 @@ const GetEmbeddingNeighborsSchema = z.object({
 
 const GetNoteContentSchema = z.object({
   note_path: z.string().describe('Path to the note'),
-  include_blocks: z.array(z.string()).optional().describe('Specific block headings to include'),
 });
 
 const GetStatsSchema = z.object({});
@@ -110,6 +116,10 @@ const CheckVaultIntegritySchema = z.object({
 
 const CheckSearchHealthSchema = z.object({
   canary_path: z.string().optional(),
+});
+
+const RefreshSearchIndexSchema = z.object({
+  budget: z.number().int().positive().optional(),
 });
 
 // Define available tools
@@ -176,7 +186,7 @@ const tools: Tool[] = [
   },
   {
     name: 'search_notes',
-    description: 'Semantic search over the vault. Returns an envelope, not a bare array: `mode` names the engine that answered ("semantic" is real, "keyword" means the embedding model failed to load and results will miss anything phrased differently), `coverage` says how many notes were actually searched out of the vault total, `results` holds the matches, and `warning` appears whenever the answer should not be read at face value. An empty `results` with mode "semantic" and full coverage means the vault really has nothing closer; an empty `results` with mode "keyword" or nonzero `coverage.unsearchable` means the tool was partly blind and you must not report it as an absence. Typical relevant matches score ~0.4-0.75; lower the threshold to widen recall.',
+    description: 'Semantic search over the vault, fused with literal keyword matching. Returns an envelope, not a bare array. READ `negativeResultsTrustworthy` FIRST: when it is true, an empty `results` means the vault genuinely has nothing closer; when it is false, an empty result proves nothing and you must say "not found in the verified searchable index" rather than "absent from the vault," and confirm with grep or a file read if absence actually matters. `mode` names the engine that answered ("keyword" means the embedding model never loaded). `coverage` separates three different questions: `semantic` (notes with a vector built from their CURRENT text), `lexical` (every readable note, which is why a distinctive phrase finds a note the moment it is written), and `plugin` (how much of Obsidian Smart Connections could be reused, and how much was dropped as stale). `coverage.freshnessVerified` says whether the corpus could be checked at all; `coverage.coverageComplete` says whether every eligible note has a current vector. Each result carries `matchedVia`: "lexical" means a literal term match surfaced it below the semantic threshold, which is usually the right answer to a query that was itself a literal string. Typical relevant matches score ~0.4-0.75; use 0.3 for open questions.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -236,13 +246,27 @@ const tools: Tool[] = [
   },
   {
     name: 'check_search_health',
-    description: 'Positive control for retrieval. Asks the index for notes that are known to be there, by their own titles, and reports whether they come back. Use this at session start, before trusting any empty search result, and any time a vault has been quiet or moved between machines. Returns `alive` (false means every empty result from this server is untrustworthy), `verdict` (a plain-language line written to be read aloud), `mode`, `coverage`, and the individual probes. A retrieval tool that can return nothing must be able to prove it can still see.',
+    description: 'Whether this vault can be trusted to say a topic is absent. Call it at session start, before reporting any empty search result as an absence, and any time a vault has been quiet or moved between machines. It reports four separate facts rather than one blurred one: `semanticReady` (the machinery loaded), `retrievalProbePassed` (notes it holds vectors for do come back when asked by name), `freshnessVerified` (the corpus was reconciled against disk with no unaccounted read, hash or classification failure), and `coverageComplete` (every eligible note on disk has a vector built from its CURRENT text). `negativeResultsTrustworthy` is the AND of all four and is the one field to read: only when it is true does an empty search result mean the vault has nothing. `verdict` is a plain-language line written to be read aloud. `verifiedAt` and `corpusGeneration` date the answer, because a boolean you cannot date is worth much less. Note that probes alone can never establish freshness: they draw their expected notes from the index itself, so they pass happily on a corpus embedded months ago, which is exactly how this went unnoticed for a month.',
     inputSchema: {
       type: 'object',
       properties: {
         canary_path: {
           type: 'string',
           description: 'Optional vault-relative path to a known note to probe for specifically, in addition to the automatic sample.',
+        },
+      },
+    },
+  },
+  {
+    name: 'refresh_search_index',
+    description: 'Embed every note that does not yet have a verified-current vector, deliberately, rather than waiting for it to trickle in across the first ten queries a member asks. Resumable and idempotent: it recomputes what is pending from disk on every call, so an interruption, a reboot, a failed embedding or a second invocation all reduce to the same thing. Anything already current is skipped without an embed call. Call this after a migration, after importing a vault, after a long gap, or any time check_search_health reports coverageComplete: false and you want it finished now instead of eventually. Returns attempted, refreshed, alreadyCurrent, failed, remaining, raced and coverageComplete; when remaining is above zero, call it again. Note that keyword matching covers the whole vault throughout, so pending notes are findable by a distinctive phrase the entire time.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        budget: {
+          type: 'number',
+          description: 'Maximum embedding calls to spend in this run. Defaults to SMART_INDEX_EMBED_BUDGET or 3000. A note costs one call plus one per heading section, so this is not a note count.',
+          minimum: 1,
         },
       },
     },
@@ -277,18 +301,13 @@ const tools: Tool[] = [
   },
   {
     name: 'get_note_content',
-    description: 'Retrieve the full content of a note, optionally with specific blocks/sections extracted.',
+    description: 'The full current text of a note, read from disk, plus the headings it currently has. `blocks` comes from the live markdown unless the note has a verified-current plugin index entry, because heading-to-line-range mappings recorded at import time are exactly as suspect as the vectors built from them once a file changes.',
     inputSchema: {
       type: 'object',
       properties: {
         note_path: {
           type: 'string',
           description: 'Path to the note',
-        },
-        include_blocks: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'Specific block headings to include (optional)',
         },
       },
       required: ['note_path'],
@@ -317,7 +336,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case 'get_similar_notes': {
         const { note_path, threshold, limit } = GetSimilarNotesSchema.parse(args);
-        const results = searchEngine.getSimilarNotes(note_path, threshold, limit);
+        const results = await searchEngine.getSimilarNotes(note_path, threshold, limit);
         return {
           content: [
             {
@@ -330,7 +349,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_connection_graph': {
         const { note_path, depth, threshold, max_per_level } = GetConnectionGraphSchema.parse(args);
-        const graph = searchEngine.getConnectionGraph(note_path, depth, threshold, max_per_level);
+        const graph = await searchEngine.getConnectionGraph(note_path, depth, threshold, max_per_level);
         return {
           content: [
             {
@@ -435,9 +454,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case 'refresh_search_index': {
+        const { budget } = RefreshSearchIndexSchema.parse(args);
+        const report = await searchEngine.refreshSearchIndex(budget);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(report, null, 2) }],
+        };
+      }
+
       case 'get_embedding_neighbors': {
         const { embedding_vector, k, threshold } = GetEmbeddingNeighborsSchema.parse(args);
-        const results = searchEngine.getEmbeddingNeighbors(embedding_vector, k, threshold);
+        const results = await searchEngine.getEmbeddingNeighbors(embedding_vector, k, threshold);
         return {
           content: [
             {
@@ -449,8 +476,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_note_content': {
-        const { note_path, include_blocks } = GetNoteContentSchema.parse(args);
-        const result = searchEngine.getNoteWithContext(note_path, include_blocks);
+        const { note_path } = GetNoteContentSchema.parse(args);
+        const result = await searchEngine.getNoteWithContext(note_path);
         return {
           content: [
             {
@@ -463,7 +490,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_stats': {
         GetStatsSchema.parse(args);
-        const stats = searchEngine.getStats();
+        const stats = await searchEngine.getStats();
         return {
           content: [
             {

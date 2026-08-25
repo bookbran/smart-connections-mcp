@@ -24,7 +24,7 @@
  */
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { listMarkdown } from './vault-indexer.js';
+import { VaultInventory } from './corpus-state.js';
 /**
  * Link targets that are structural rather than notes: folder shorthand and the
  * placeholders documentation uses when explaining the syntax. Reporting these as
@@ -78,13 +78,16 @@ function spellings(rel, text) {
     return out;
 }
 export function buildLinkGraph(vaultPath) {
-    const rels = listMarkdown(vaultPath);
+    // One walker for the whole server. The link graph used to keep its own, which
+    // meant two answers to "what notes exist" that could drift apart silently.
+    const entries = VaultInventory.build(vaultPath).values();
     const index = new Map();
     const bodies = new Map();
-    for (const rel of rels) {
+    for (const entry of entries) {
+        const rel = entry.path;
         let text = '';
         try {
-            text = readFileSync(join(vaultPath, rel), 'utf-8');
+            text = readFileSync(join(vaultPath, entry.diskPath), 'utf-8');
         }
         catch {
             /* unreadable notes still resolve by name */
@@ -102,7 +105,7 @@ export function buildLinkGraph(vaultPath) {
     const backlinks = new Map();
     const unresolved = new Map();
     const noFrontmatter = new Set();
-    for (const rel of rels) {
+    for (const rel of bodies.keys()) {
         const text = bodies.get(rel) || '';
         if (!text.startsWith('---') || text.indexOf('\n---', 3) < 0)
             noFrontmatter.add(rel);
@@ -131,7 +134,7 @@ export function buildLinkGraph(vaultPath) {
             backlinks.get(target).add(rel);
         }
     }
-    return { index, edges, backlinks, unresolved, noFrontmatter, noteCount: rels.length };
+    return { index, edges, backlinks, unresolved, noFrontmatter, noteCount: bodies.size };
 }
 /**
  * Resolve one wikilink the way Obsidian would.

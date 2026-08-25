@@ -106,6 +106,21 @@ export interface CorpusState {
     onDisk: Map<string, InventoryEntry>;
     /** Canonical content hash per note we could read. */
     contentHashes: Map<string, string>;
+    /**
+     * Canonical text, kept from the reconciliation read.
+     *
+     * Reconciliation already reads and canonicalizes every note in order to hash
+     * it, so lexical search over the whole vault costs nothing extra rather than a
+     * second full read per query. Capped by total bytes: past the cap a note is
+     * simply re-read on demand, which is slower and still complete. Lexical
+     * coverage must never depend on how much memory we felt like using.
+     */
+    text: Map<string, string>;
+    /**
+     * Map any producer's spelling of a path onto the disk's. Bound to this
+     * snapshot's inventory so callers do not have to carry the inventory around.
+     */
+    resolvePath: (rawPath: string) => string | null;
     /** Notes big enough to carry meaning, and therefore expected to have a vector. */
     eligible: Set<string>;
     /** Notes deliberately never embedded, so they never count against coverage. */
@@ -137,6 +152,11 @@ export interface CorpusState {
 }
 /** True when nothing about this snapshot is unaccounted for. */
 export declare function corpusIsClean(state: CorpusState): boolean;
+/**
+ * Canonical text for a note: from the snapshot when it is held, from disk when
+ * it is not. Returns null only when the note cannot be read at all.
+ */
+export declare function readCanonicalText(state: CorpusState, path: string): string | null;
 /**
  * Builds and re-builds the snapshot.
  *

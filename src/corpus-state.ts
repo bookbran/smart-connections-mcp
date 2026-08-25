@@ -42,10 +42,10 @@
  * homework.
  */
 
-import { readdirSync, statSync, promises as fsp } from 'fs';
+import { readdirSync, readFileSync, statSync, promises as fsp } from 'fs';
 import { join, relative, sep } from 'path';
 import { canonicalPath, caseFold, isMarkdownPath } from './canonical-path.js';
-import { CONTENT_HASH_ALGORITHM, canonicalContentHash } from './content-hash.js';
+import { CONTENT_HASH_ALGORITHM, canonicalContentHash, canonicalizeMarkdown } from './content-hash.js';
 import { verifyPluginSource, type PluginVectorVerdict } from './smart-connections-hash.js';
 import { loadSupplementalCache, entryIsCurrent } from './supplemental-store.js';
 import type { SmartConnectionsLoader } from './smart-connections-loader.js';
@@ -203,6 +203,21 @@ export interface CorpusState {
   onDisk: Map<string, InventoryEntry>;
   /** Canonical content hash per note we could read. */
   contentHashes: Map<string, string>;
+  /**
+   * Canonical text, kept from the reconciliation read.
+   *
+   * Reconciliation already reads and canonicalizes every note in order to hash
+   * it, so lexical search over the whole vault costs nothing extra rather than a
+   * second full read per query. Capped by total bytes: past the cap a note is
+   * simply re-read on demand, which is slower and still complete. Lexical
+   * coverage must never depend on how much memory we felt like using.
+   */
+  text: Map<string, string>;
+  /**
+   * Map any producer's spelling of a path onto the disk's. Bound to this
+   * snapshot's inventory so callers do not have to carry the inventory around.
+   */
+  resolvePath: (rawPath: string) => string | null;
 
   /** Notes big enough to carry meaning, and therefore expected to have a vector. */
   eligible: Set<string>;
@@ -251,6 +266,32 @@ export function corpusIsClean(state: CorpusState): boolean {
 
 /** How many files are read at once during reconciliation. */
 const READ_CONCURRENCY = 24;
+
+/**
+ * How much canonical text a snapshot keeps in memory for lexical search.
+ *
+ * 64M characters covers a vault far larger than any this has run on. Past it,
+ * notes are re-read on demand: slower, never less complete. A retrieval corpus
+ * that silently shrank to fit a memory budget would be the same class of lie as
+ * the one being fixed.
+ */
+const TEXT_CACHE_BUDGET_CHARS = 64 * 1024 * 1024;
+
+/**
+ * Canonical text for a note: from the snapshot when it is held, from disk when
+ * it is not. Returns null only when the note cannot be read at all.
+ */
+export function readCanonicalText(state: CorpusState, path: string): string | null {
+  const held = state.text.get(path);
+  if (held !== undefined) return held;
+  const entry = state.onDisk.get(path);
+  if (!entry) return null;
+  try {
+    return canonicalizeMarkdown(readFileSync(join(state.vaultPath, entry.diskPath), 'utf-8'));
+  } catch {
+    return null;
+  }
+}
 
 async function mapWithConcurrency<T>(
   items: T[],
@@ -333,6 +374,8 @@ export class CorpusReconciler {
       contentHashAlgorithm: CONTENT_HASH_ALGORITHM,
       onDisk: new Map(),
       contentHashes: new Map(),
+      text: new Map(),
+      resolvePath: (rawPath: string) => inventory.resolve(rawPath),
       eligible: new Set(),
       ineligible: new Set(),
       pluginFresh: new Set(),
@@ -353,6 +396,8 @@ export class CorpusReconciler {
     };
 
     for (const entry of inventory.values()) state.onDisk.set(entry.path, entry);
+
+    let textBytes = 0;
 
     // Plugin sources, re-keyed onto disk spelling. A source whose path resolves
     // to nothing on disk is a phantom: the note was deleted or renamed and the
@@ -411,6 +456,10 @@ export class CorpusReconciler {
       }
 
       state.contentHashes.set(entry.path, hash);
+      if (textBytes + canonical.length <= TEXT_CACHE_BUDGET_CHARS) {
+        state.text.set(entry.path, canonical);
+        textBytes += canonical.length;
+      }
 
       if (canonical.trim().length < MIN_EMBEDDABLE_CHARS) {
         state.ineligible.add(entry.path);

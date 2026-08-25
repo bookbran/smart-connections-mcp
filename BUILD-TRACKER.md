@@ -293,12 +293,12 @@ condition, not a repo bug.
 
 ## Phase 2 -- Make semantic retrieval tell the truth
 
-- [ ] **2.1 Supplemental indexing consumes "needs a current vector," not
+- [x] **2.1 Supplemental indexing consumes "needs a current vector," not
   "missing path."** Replace `!knownPaths.has(p)` with membership in
   `semanticPending`. Deliberately after Phase 1 so it is a set operation rather
   than a second implementation of freshness.
 
-- [ ] **2.2 A vector is bound to the exact content that produced it.**
+- [x] **2.2 A vector is bound to the exact content that produced it.**
   Close this race:
   ```
   read file -> hash A -> begin embedding -> member edits file (content B)
@@ -312,12 +312,12 @@ condition, not a repo bug.
   exactly the content it was built from, and that fingerprint still equals
   disk.**
 
-- [ ] **2.3 Drop stale vectors from ranking, whole-note AND block together.**
+- [x] **2.3 Drop stale vectors from ranking, whole-note AND block together.**
   Filtering `pluginVectors()` without also filtering `getBlockVectors()` leaves
   the bug intact, because `denseScores` takes the max and a stale block can be
   the strongest signal for a note.
 
-- [ ] **2.4 Verify the lexical rescue comes back.** Regression test: a note with
+- [x] **2.4 Verify the lexical rescue comes back.** Regression test: a note with
   a stale plugin vector and a unique literal phrase must be returned by
   `search_notes`. This currently fails and is the sharpest single proof the fix
   worked.
@@ -326,7 +326,7 @@ condition, not a repo bug.
 
 ## Phase 3 -- Make the lexical corpus the whole vault
 
-- [ ] **3.1 `searchByKeyword` iterates the inventory, not `getSources()`.**
+- [x] **3.1 `searchByKeyword` iterates the inventory, not `getSources()`.**
   A note Smart Connections has never seen is currently invisible to keyword
   fallback despite sitting on disk. Result: lexical corpus = every readable
   markdown file; semantic corpus = every file with a verified-current vector.
@@ -336,14 +336,14 @@ condition, not a repo bug.
 
 ## Phase 4 -- Coverage by set difference
 
-- [ ] **4.1 Compute coverage with sets, never by adding counts.**
+- [x] **4.1 Compute coverage with sets, never by adding counts.**
   `searchablePaths = semanticPaths INTERSECT onDiskPaths`;
   `unsearchablePaths = onDiskPaths MINUS searchablePaths`. Makes three bug
   classes structurally impossible: duplicate paths inflating `searched`,
   phantoms inflating anything, and plugin/supplemental overlap making
   `searched > vaultTotal`.
 
-- [ ] **4.2 New coverage contract, with errors visible.** Separate `semantic`
+- [x] **4.2 New coverage contract, with errors visible.** Separate `semantic`
   (searchable, pending, pluginFresh, supplementalFresh) from `lexical`
   (searchable) from `plugin` (sources, fresh, stale, phantom). Surface
   `inventoryErrors`, `hashFailures`, `embedFailures`, `unreadable`. **Any
@@ -355,30 +355,30 @@ condition, not a repo bug.
 
 ## Phase 5 -- Every other retrieval surface, and making bypass hard
 
-- [ ] **5.1 `getCurrentVectorCorpus()`, and everything semantic uses it.**
+- [x] **5.1 `getCurrentVectorCorpus()`, and everything semantic uses it.**
   Merges fresh plugin vectors with current supplemental vectors. Without this,
   `search_notes` returns current results while `get_similar_notes` and
   `get_connection_graph` still answer from the old snapshot. May require making
   `getSimilarNotes` async; worth it.
 
-- [ ] **5.2 The query note gets the same treatment.** If a note is stale in the
+- [x] **5.2 The query note gets the same treatment.** If a note is stale in the
   plugin but fresh in supplemental, `get_similar_notes` on that note must use
   the supplemental vector. Easy to miss because the source note is fetched by a
   different call path than the comparison set.
 
-- [ ] **5.3 `get_connection_graph` and `get_embedding_neighbors`** inherit the
+- [x] **5.3 `get_connection_graph` and `get_embedding_neighbors`** inherit the
   fix via 5.1; add a test that proves it rather than assuming.
 
-- [ ] **5.4 `getStats` reports vault-world, not plugin-world.** Split into
+- [x] **5.4 `getStats` reports vault-world, not plugin-world.** Split into
   `vaultNotes`, `pluginSources`, `pluginFresh`, `supplemental`,
   `semanticSearchable`.
 
-- [ ] **5.5 Block metadata is only trustworthy for fresh notes.** Plugin sources
+- [x] **5.5 Block metadata is only trustworthy for fresh notes.** Plugin sources
   carry heading-to-line-range mappings; once a file changes those coordinates are
   as suspect as the vectors. Use them only for `pluginFresh`, or derive headings
   from current markdown.
 
-- [ ] **5.6 Make bypassing the corpus hard in code, not just forbidden in
+- [x] **5.6 Make bypassing the corpus hard in code, not just forbidden in
   prose.** Once `getCurrentVectorCorpus()` exists, make raw access
   (`loader.getSources()`, raw block vectors) private or explicitly unsafe
   everywhere outside the classifier. Search, similar-notes, graphs, neighbors,
@@ -393,7 +393,7 @@ condition, not a repo bug.
 
 ## Phase 6 -- Health that separates several different questions
 
-- [ ] **6.1 Split the verdict, with these exact names and these exact
+- [x] **6.1 Split the verdict, with these exact names and these exact
   formulas.** Names are decided; the implementation must not invent their
   meaning:
   ```
@@ -411,12 +411,12 @@ condition, not a repo bug.
   less useful than one you can tell the age of. Keep `alive` as a derived
   convenience so nothing reading it today breaks.
 
-- [ ] **6.2 Redefine the title probes as retrieval probes.** They draw expected
+- [x] **6.2 Redefine the title probes as retrieval probes.** They draw expected
   notes from the live index, so they test reachability of the historical corpus
   and pass happily on a stale one. Keep them, rename the concept, and establish
   freshness mechanically from fingerprints instead.
 
-- [ ] **6.3 Give agents one field to read.** `negativeResultsTrustworthy` is
+- [x] **6.3 Give agents one field to read.** `negativeResultsTrustworthy` is
   what rule 14 keys on, rather than every agent reconstructing the predicate from
   four numbers.
 
@@ -424,7 +424,7 @@ condition, not a repo bug.
 
 ## Phase 7 -- Two operating modes, not one budget
 
-- [ ] **7.1 Interactive repair is bounded and never blocks on backlog.**
+- [x] **7.1 Interactive repair is bounded and never blocks on backlog.**
   ```
   Interactive search:
     lexical scan immediately
@@ -436,12 +436,12 @@ condition, not a repo bug.
   multi-minute first query this cap exists to prevent. The 3,000 total can stay
   while the interactive sub-budget is much smaller.
 
-- [ ] **7.2 Prioritize query-relevant and recently-modified notes.** Lexically
+- [x] **7.2 Prioritize query-relevant and recently-modified notes.** Lexically
   scan the current vault, find high-ranking pending candidates, repair those
   first. Directory order means a note edited today waits behind hundreds of
   unrelated ones.
 
-- [ ] **7.3 `refresh_search_index`: resumable, idempotent, reporting.** Phase 10
+- [x] **7.3 `refresh_search_index`: resumable, idempotent, reporting.** Phase 10
   depends on this, so it has to be real before then. Define behaviour on
   interruption, reboot, a failed embedding call, and a second invocation. Return
   at least:
@@ -450,7 +450,7 @@ condition, not a repo bug.
   ```
   and continue safely on the next run.
 
-- [ ] **7.4 `SMART_INDEX_EMBED_BUDGET` as configuration**, with the interactive
+- [x] **7.4 `SMART_INDEX_EMBED_BUDGET` as configuration**, with the interactive
   sub-budget separately configurable.
 
 ---
@@ -638,6 +638,36 @@ contains the fix and executes it.**
 
 ## Progress log
 _(One dated line per item as it ships.)_
+- 2026-08-25: **Phases 2 through 7 shipped**, in one pass because they are one
+  change to one file plus the facade underneath it. `current-corpus.ts` is the
+  only thing retrieval ranks against; `search-engine.ts` was rewritten onto it;
+  `vault-indexer.ts` now consumes `semanticPending` and binds every vector to the
+  content instance that produced it; coverage is computed by set difference;
+  health reports four separate facts and their AND. New tool
+  `refresh_search_index`. 24 more tests, every one of which fails on a stale
+  index by construction.
+  **Verified live on the vault, not just in tests:** a query for a phrase that
+  exists only in a note edited TODAY returned that note first at 0.743, because
+  relevance-first repair embedded it during the query. 509 stale plugin vectors
+  dropped, `freshnessVerified: true`, `coverageComplete: false`,
+  `negativeResultsTrustworthy: false`, and a verdict that says
+  "SEARCH IS CONVERGING" instead of "alive". Query returned in 1.5s including
+  model load.
+  **Decisions made along the way:** (a) 5.1 was pulled forward into Phase 2
+  rather than done twice, since filtering stale vectors at each call site is the
+  thing 5.1 exists to prevent; (b) the boot log stopped saying "Loaded N notes"
+  using the plugin index size, which on this vault printed 525 for a 702-note
+  vault and was the same substitution this build removes, in a log line;
+  (c) `get_note_content` dropped its `include_blocks` parameter, which had been
+  accepted and silently ignored since the tool was written; (d) `link-graph`
+  moved onto the shared `VaultInventory` so there is one walker rather than two
+  answers to "what notes exist"; (e) `corpusIsClean` gates `freshnessVerified`,
+  so an unresolved error at ANY stage costs us the right to claim freshness;
+  (f) the interactive sub-budget defaults to 40 embed calls against the 3,000
+  total, and a query never spends the remainder synchronously.
+  **One finding worth writing down:** the lexical tokenizer drops
+  single-character terms, so `subject-7` reduces to `subject`. Correct behaviour,
+  surprising when writing a query.
 - 2026-08-25: **Phase 1 shipped.** `canonical-path.ts`, `content-hash.ts`,
   `smart-connections-hash.ts`, `supplemental-store.ts`, `corpus-state.ts`, plus 25
   tests. Live on the vault: 702 on disk, 525 plugin sources, **7 fresh / 509

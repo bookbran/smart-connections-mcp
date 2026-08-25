@@ -25,7 +25,7 @@
 
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { listMarkdown } from './vault-indexer.js';
+import { VaultInventory } from './corpus-state.js';
 
 export interface HygieneReport {
   /** Reachable from nothing and pointing at nothing. Findable only by search. */
@@ -103,14 +103,17 @@ function spellings(rel: string, text: string): string[] {
 }
 
 export function buildLinkGraph(vaultPath: string): LinkGraph {
-  const rels = listMarkdown(vaultPath);
+  // One walker for the whole server. The link graph used to keep its own, which
+  // meant two answers to "what notes exist" that could drift apart silently.
+  const entries = VaultInventory.build(vaultPath).values();
   const index = new Map<string, string>();
   const bodies = new Map<string, string>();
 
-  for (const rel of rels) {
+  for (const entry of entries) {
+    const rel = entry.path;
     let text = '';
     try {
-      text = readFileSync(join(vaultPath, rel), 'utf-8');
+      text = readFileSync(join(vaultPath, entry.diskPath), 'utf-8');
     } catch {
       /* unreadable notes still resolve by name */
     }
@@ -128,7 +131,7 @@ export function buildLinkGraph(vaultPath: string): LinkGraph {
   const unresolved = new Map<string, Set<string>>();
   const noFrontmatter = new Set<string>();
 
-  for (const rel of rels) {
+  for (const rel of bodies.keys()) {
     const text = bodies.get(rel) || '';
     if (!text.startsWith('---') || text.indexOf('\n---', 3) < 0) noFrontmatter.add(rel);
     const stripped = text.replace(CODE, '');
@@ -151,7 +154,7 @@ export function buildLinkGraph(vaultPath: string): LinkGraph {
     }
   }
 
-  return { index, edges, backlinks, unresolved, noFrontmatter, noteCount: rels.length };
+  return { index, edges, backlinks, unresolved, noFrontmatter, noteCount: bodies.size };
 }
 
 /**
