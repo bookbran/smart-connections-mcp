@@ -5,8 +5,8 @@ in the vault, plus Dan's architectural review of it (logged at
 [`intelligence/decisions/2026-08-25-current-corpus-architecture.md`](https://github.com/bookbran/JDH-Second-Brain/blob/main/intelligence/decisions/2026-08-25-current-corpus-architecture.md)).
 This file tracks *doing* it.
 
-**Board:** [apc-ai-course#103](https://github.com/goggledefogger/apc-ai-course/issues/103) (parent) and the issue this tracker was opened with.
-**Status:** not started. Phase 0 is the only thing that must happen today.
+**Board:** [apc-ai-course#138](https://github.com/goggledefogger/apc-ai-course/issues/138) (this work), split out of [#103](https://github.com/goggledefogger/apc-ai-course/issues/103) (the install path, shipped as kit 0.5.0).
+**Status:** Phase 0.1 done. 0.2 open. Nothing in Phase 1 started.
 
 ## What this build takes from, to
 
@@ -62,7 +62,7 @@ Measured on Dan's 700-note vault, 2026-08-25:
 
 ## Phase 0 -- Stop the bleeding (today, before any code)
 
-- [ ] **0.1 Patch [[CLAUDE]] rule 14 in the vault.** Right now the rule tells
+- [x] **0.1 Patch [[CLAUDE]] rule 14 in the vault.** DONE 2026-08-25, vault `3aaf7c5`. Right now the rule tells
   every agent to trust `mode: semantic` + `unsearchable: 0`, a predicate that
   cannot fail. Replace with: an empty semantic result is evidence of absence
   only when health reports freshness verified AND coverage complete; otherwise
@@ -227,6 +227,9 @@ Measured on Dan's 700-note vault, 2026-08-25:
 
 ## Progress log
 _(One dated line per item as it ships.)_
+- 2026-08-25: **0.1 shipped.** Rule 14 in the vault now says `unsearchable: 0`
+  proves nothing and names the interim test, because leaving it intact told every
+  agent to make an inference already demonstrated unsound. Vault commit `3aaf7c5`.
 - 2026-08-25: Tracker created from the staleness diagnosis and Dan's review.
   Pre-work already done and recorded above: hash fields located in real data,
   `size` shown sufficient for the two known cases, and the RRF-suppression
