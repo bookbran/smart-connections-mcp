@@ -45,7 +45,7 @@ console.error(`Smart Connections index: ${loader.getSourceCount()} entries ` +
 // Create MCP server
 const server = new Server({
     name: 'smart-connections-mcp',
-    version: '1.0.0',
+    version: '1.1.0',
 }, {
     capabilities: {
         tools: {},

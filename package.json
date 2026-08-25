@@ -1,6 +1,6 @@
 {
   "name": "smart-connections-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server for Obsidian Smart Connections - enables semantic search and knowledge graph queries",
   "type": "module",
   "main": "dist/index.js",
