@@ -6,7 +6,7 @@ in the vault, plus Dan's architectural review of it (logged at
 This file tracks *doing* it.
 
 **Board:** [apc-ai-course#138](https://github.com/goggledefogger/apc-ai-course/issues/138) (this work), split out of [#103](https://github.com/goggledefogger/apc-ai-course/issues/103) (the install path, shipped as kit 0.5.0).
-**Status:** Phase 0.1 done. 0.2 open. Nothing in Phase 1 started.
+**Status:** Phase 0.1 done. 0.2 open. Nothing in Phase 1 started. Runs unattended: see "Decisions already made".
 
 ## What this build takes from, to
 
@@ -20,9 +20,20 @@ semantic coverage. The plugin stops being a source of truth and becomes one
 source of reusable embeddings.
 
 Phases are ordered blockers-first, and the build is not done when the engine is
-fixed. **Phase 9 ships it**: a rebuilt zip, a kit release, a live deploy, and the
-board told. A correctness fix that only ever runs on Dan's machine has not
-helped the person the kit was built for.
+fixed. Phases 9 through 11 are the point: **the fresh-download path**, the
+**migration path**, and then shipping. A correctness fix that only ever runs on
+Dan's machine has not helped the person the kit was built for.
+
+**Almost nobody is running this system yet**, which is the whole strategic
+situation. The population that could ever experience the broken version is still
+tiny, so a fresh download can simply be correct, and everything else is a small
+patch. Weight decisions accordingly: when a tradeoff pits fresh-install quality
+against backwards compatibility, fresh install wins.
+
+**This tracker does not have checkpoints.** Every decision it needs has been made
+and written down, including the ones that used to say "bring it to Dan". Run it
+start to finish in one pass, exercising judgment where something unforeseen comes
+up rather than stopping. See "Decisions already made" below.
 
 Phase 1 is the architectural change Dan
 called the deepest improvement; doing Phase 2 onward without it just scatters
@@ -38,6 +49,37 @@ raised ceiling.
 **Second hard rule:** every freshness predicate biases toward false-stale. A
 false stale costs one unnecessary embedding. A false fresh is a confidently
 wrong answer, which is the entire bug.
+
+---
+
+## Decisions already made, so this build never stops to ask
+
+Dan's instruction, 2026-08-25: make the calls, run it in one pass, no
+checkpoints. Every question this tracker used to hold open is answered below.
+Where something genuinely unforeseen comes up, use judgment and **write down what
+you decided and why** in the progress log, then keep going.
+
+| Question | Decision |
+|---|---|
+| Freshness predicate | Hash if reproducible. Otherwise `size` exact match AND `last_import.mtime >= file.mtimeMs - 2`. Never mtime alone. |
+| Stale vectors in ranking | Dropped, whole-note and block together. |
+| Embed budget | Stays 3,000 interactive. Bulk work goes through the deliberate refresh path. |
+| Health field names | `semanticReady`, `retrievalProbePassed`, `freshnessVerified`, `coverageComplete`, `negativeResultsTrustworthy`. Keep `alive` as derived. |
+| Existing installs | Self-heal: fast-forward a clean bridge clone on boot, refuse loudly on any other state. |
+| An imported stale `.smart-env` | Treated exactly like any other index. Fresh entries used, stale ones ignored. No special case. |
+| Migration backlog | Bulk refresh at migration time, not interactive dribble. |
+| Fresh install vs backwards compatibility | Fresh install wins. Almost nobody is running the old thing. |
+| Rule 14 | Interim wording now, simplified to `negativeResultsTrustworthy` once the server reports it. |
+
+**The bar for stopping is real harm, not uncertainty.** Do not stop to confirm a
+design choice, a name, a threshold, or an ordering. Do stop for: destroying a
+member's data, force-pushing over someone else's work, a dirty tree this build
+did not create, or anything that cannot be undone with `git revert`. Those are
+not checkpoints; they are the ordinary care any build takes.
+
+**When a decision above turns out to be wrong once it meets the code**, change
+it, say so in the progress log with the reason, and continue. A tracker decision
+is a starting position, not a cage. What is not acceptable is stalling on it.
 
 ---
 
@@ -98,8 +140,10 @@ Measured on Dan's 700-note vault, 2026-08-25:
   2121-byte July content and looking for a 6-char base36 match; check Smart
   Connections' bundled `main.js` the way the pooling detail was confirmed in
   August). If reproducible, hash is authoritative and mtime+size is only a
-  fast-path skip. If not, fall back to **`size` equality AND a tight mtime
-  epsilon**, never mtime alone, and never a 1000ms slack. Done when a table of
+  fast-path skip. **If not, DECIDED fallback, no need to ask:** an entry is fresh
+  only when `size` matches exactly AND `last_import.mtime >= file.mtimeMs - 2`.
+  Two milliseconds, not one second: it covers JSON round-trip precision loss and
+  nothing else. Size mismatch is stale regardless of any timestamp. Done when a table of
   cases passes: unchanged file, same-size edit, touched-but-unchanged,
   timestamp-preserving copy, timestamp-destroying copy.
 
@@ -186,10 +230,14 @@ Measured on Dan's 700-note vault, 2026-08-25:
 
 ## Phase 6 -- Health that separates four different questions
 
-- [ ] **6.1 Split the verdict.** `semanticReady`, `retrievalProbePassed`,
-  `freshnessVerified`, `coverageComplete`, `negativeResultsTrustworthy`. A
-  healthy-but-catching-up server is not a dead one, and one boolean `alive`
-  cannot say that.
+- [ ] **6.1 Split the verdict. Field names DECIDED, use these exactly:**
+  `semanticReady`, `retrievalProbePassed`, `freshnessVerified`,
+  `coverageComplete`, `negativeResultsTrustworthy`, with the nested
+  `semantic` / `lexical` / `plugin` coverage objects from Dan's review. These are
+  his own proposed names, already reviewed, so adopt them verbatim rather than
+  reopening naming. Keep `alive` as a derived convenience so nothing that reads
+  it today breaks. A healthy-but-catching-up server is not a dead one, and one
+  boolean cannot say that.
 
 - [ ] **6.2 Redefine the title probes as retrieval probes.** They draw expected
   notes from the live index, so they test reachability of the historical corpus
@@ -230,80 +278,141 @@ Measured on Dan's 700-note vault, 2026-08-25:
 
 ---
 
-## Phase 9 -- Ship it to everyone, not just Dan's vault
+## Phase 9 -- The fresh-download path (the one that matters most)
 
-Everything above fixes the engine. This phase is what turns that into something
-a member who downloads the zip actually receives, and it ends by telling the
-board.
+Almost nobody is running this yet. That is the opportunity: the population that
+will ever experience the broken version is still small, and a fresh download can
+be made correct with no migration story at all. **Fresh install is the highest
+priority surface in this build.** Get it right and the rest is a patch for a
+handful of people.
 
-**Read this before starting: the zip does NOT contain the bridge.** It contains
-the dashboard, whose `seedSearchBridge` clones `bookbran/smart-connections-mcp`
-from GitHub on a brain's first boot. So a fix merged to `main` here reaches every
-NEW brain with no zip rebuild at all, and reaches NO existing install, ever,
-because nothing pulls. That asymmetry is the whole content of this phase, and it
-is a claim to verify rather than assume. Assuming it is how the original bug got
+**Read this first: the zip does NOT contain the bridge.** It contains the
+dashboard, whose `seedSearchBridge` clones `bookbran/smart-connections-mcp` from
+GitHub on a brain's first boot. So a fix merged to `main` here reaches every NEW
+brain with no zip rebuild, and reaches NO existing install unless something
+pulls. Verify that claim rather than assuming it; assuming is how this bug got
 here.
 
-- [ ] **9.1 Prove the fix reaches a new brain end to end.** On a throwaway brain
-  directory, boot the dashboard fresh and let `seedSearchBridge` do its clone and
-  build unaided. Then run `check_search_health` against it and confirm the new
-  freshness fields are present and honest. Done when a brain that has never
-  existed before comes up with verified-current search and nobody typed a command.
+- [ ] **9.1 Prove the fix reaches a brand new brain, end to end, unaided.** On a
+  throwaway brain directory, boot the dashboard fresh and let `seedSearchBridge`
+  clone and build with nobody helping it. Then run `check_search_health` and
+  confirm the new freshness fields are present and honest. Done when a brain that
+  never existed before comes up with verified-current search and no human typed a
+  command.
 
-- [ ] **9.2 Decide what happens to existing installs.** Every member already
-  running has a clone pinned at whatever `main` was on their first boot, and no
-  mechanism updates it. Options, in rough order of preference: have
-  `seedSearchBridge` fast-forward an existing clean clone on boot (cheap, and the
-  bridge is not the member's code to conflict with); or expose a maintenance
-  operation; or version-check and tell the agent to offer it. **Bring the
-  recommendation to Dan rather than picking silently**, because it decides
-  whether a shipped brain self-heals or quietly stays broken. Whatever is chosen
-  needs a test.
+- [ ] **9.2 Existing installs self-heal on boot. DECIDED, build it.**
+  `seedSearchBridge` fast-forwards an existing bridge clone when it is safe to:
+  the directory is a git repo, the remote is `bookbran/smart-connections-mcp`,
+  the tree is clean, and it is on `main`. Then `git pull --ff-only` and rebuild if
+  the pull moved anything. Any other state (dirty tree, detached head, a fork,
+  someone's local work) logs the reason and leaves it completely alone. Rationale
+  for the record: the bridge is infrastructure, not the member's code, so there is
+  nothing of theirs to conflict with, and a shipped brain that cannot self-heal
+  means this bug lives forever in the installs of people who will never know to
+  ask. Detached and non-fatal like the install. Needs a test for both legs, the
+  clean fast-forward and the refusal.
 
-- [ ] **9.3 Retire the Phase 0.2 caveat and describe the real contract.**
-  `SEARCH-BRIDGE.md` ships inside the zip and into every seeded brain, so it is
-  where an agent learns what search can and cannot promise. Remove the interim
-  warning, document the new health fields, and state plainly which one answers
-  "can I trust an empty result."
+- [ ] **9.3 Retire the interim caveat and state the real contract.**
+  `SEARCH-BRIDGE.md` ships in the zip and into every seeded brain, so it is where
+  an agent learns what search can promise. Remove the Phase 0.2 warning, document
+  the new health fields, and say plainly which single field answers "can I trust
+  an empty result."
 
 - [ ] **9.4 Simplify vault rule 14 to the shipped signal.** Phase 0.1 was
-  deliberately interim wording. Per Dan's ruling, once the server reports it,
-  the rule keys on one machine-readable field
-  (`negativeResultsTrustworthy === true`) rather than making every agent
-  reconstruct a four-field predicate. Vault repo, `CLAUDE.md`.
+  deliberately interim. Now that the server reports it, the rule keys on
+  `negativeResultsTrustworthy === true` rather than making every agent
+  reconstruct a four-field predicate. Vault repo, `CLAUDE.md`. Leaving the scary
+  interim wording in place after the fix ships is its own kind of stale.
 
-- [ ] **9.5 Rebuild the Astrolabe zip.**
+- [ ] **9.5 First-run cost is honest.** A fresh brain embeds its whole vault on
+  first use. Confirm the budget and the catch-up scheduling from Phase 7 make
+  that tolerable rather than a multi-minute stall on a member's first question,
+  and that health reports `coverageComplete: false` while it converges instead of
+  claiming completeness it has not earned.
+
+---
+
+## Phase 10 -- The migration path, which is where the backlog actually bites
+
+A member bringing an existing vault in is the one case that dumps hundreds of
+notes into a brain at once. On Dan's own migration that was roughly 660 notes.
+The interactive embed budget is 3,000 calls, about 258 notes, so a migrated
+brain is **guaranteed** to start life with a large semantic backlog. Migration is
+also the exact moment a member is most likely to have a stale `.smart-env` from
+an Obsidian install they stopped opening, which is the bug this whole build is
+about, arriving pre-installed.
+
+- [ ] **10.1 `MIGRATE.md` wires in search, as a real step.** The migration skill
+  currently ends at frontmatter passes and hands off to name-your-world. Add a
+  step after the passes: make sure the bridge is installed and the migrated notes
+  are actually embedded. Written the way the rest of that file is written, as the
+  agent's job and never the member's, and honest that it runs in the background.
+  `dashboard/MIGRATE.md` in `second-brain-dashboard` is Kit material, so the
+  commit needs a `KIT-CHANGELOG.md` entry in the same pass or the pre-commit hook
+  refuses it.
+
+- [ ] **10.2 Migration triggers deliberate catch-up, not interactive dribble.**
+  Use the `refresh_search_index` maintenance operation from Phase 7.3 rather than
+  letting a 660-note backlog trickle in 258 notes at a time across the member's
+  first ten queries. Migration is a bulk moment and should get the bulk path.
+
+- [ ] **10.3 An imported `.smart-env` is treated as suspect, not as truth.**
+  DECIDED: a migrated vault's existing plugin index is used only where Phase 1.3
+  says an entry is fresh, exactly like any other. No special case, no trusting it
+  because it looks populated. Add a fixture: a vault arriving with a populated
+  but months-old `.smart-env` must come up with correct search and honest
+  coverage.
+
+- [ ] **10.4 The migration manifest records search state.** `MIGRATE.md`'s
+  contract promises a manifest and reversibility. Note in it how many notes were
+  embedded, how many are pending, and that search converges rather than being
+  instantly complete. A member who migrates and immediately searches should not
+  conclude their notes vanished.
+
+- [ ] **10.5 Verify the whole migration path on a real copy.** Take a throwaway
+  copy of a real multi-hundred-note vault, run the migration skill's passes
+  against it, and confirm search comes up correct and honest at the end. Copy,
+  never the original.
+
+---
+
+## Phase 11 -- Ship it, then tell the board
+
+- [ ] **11.1 Rebuild the Astrolabe zip.**
   `powershell -NoProfile -ExecutionPolicy Bypass -File dashboard/dev/build-astrolabe-zip.ps1`
-  in `second-brain-dashboard`. Then actually open the built zip and confirm the
-  changed files are in it; the builder excludes `test`, `docs`, `dist` and
+  in `second-brain-dashboard`. Then open the built zip and confirm the changed
+  files are actually inside it. The builder excludes `test`, `docs`, `dist` and
   `dist-template`, and a file in the wrong place ships as silence.
 
-- [ ] **9.6 Cut the kit release.** In `apc-second-brain-kit`: copy the zip to
+- [ ] **11.2 Cut the kit release.** In `apc-second-brain-kit`: copy the zip to
   `functions/protected/astrolabe.zip`, bump `functions/kit-version.json`
-  (currently 0.5.0; this is a minor bump), and add a `CHANGELOG.md` entry written
-  for a member, saying what changes for them rather than what changed in the
-  code. The repo documents this sequence under "How to cut a release".
+  (currently 0.5.0, this is a minor bump), and add a `CHANGELOG.md` entry written
+  for a member, saying what changes for them rather than what changed in the code.
+  The repo documents the sequence under "How to cut a release".
 
-- [ ] **9.7 Deploy and verify live.** `npm run deploy` from `functions/`. Dan
-  handles the Firebase auth prompt if it appears; `firebase login:list` should
-  show `dan@aportlandcareer.com`. **Verify by fetching
-  `https://apc-second-brain-kit.web.app/version` and reading the version back.**
-  A successful deploy message is not verification.
+- [ ] **11.3 Deploy and verify live.** `npm run deploy` from `functions/`.
+  **Verify by fetching `https://apc-second-brain-kit.web.app/version` and reading
+  the version back.** A successful deploy message is not verification.
 
-- [ ] **9.8 Commit and push all four repos.** `smart-connections-mcp`,
-  `second-brain-dashboard`, `apc-second-brain-kit`, and the vault. Check each for
-  a dirty tree first. Note that `second-brain-dashboard` has a pre-commit hook
-  requiring a `KIT-CHANGELOG.md` entry for any change to staged Kit material.
+- [ ] **11.4 Dan's own vault is left working.** Restart Astrolabe against
+  `C:\Users\danie\Projects\JDH-Second-Brain`, let the catch-up run, and confirm
+  `check_search_health` reports honest freshness and that a note written today is
+  findable. It started at 7 fresh of 525; record the after number. Check for live
+  Astrolabe tabs before restarting and let any busy one finish.
 
-- [ ] **9.9 Update the board, last.** Post results to
+- [ ] **11.5 Commit and push all four repos.** `smart-connections-mcp`,
+  `second-brain-dashboard`, `apc-second-brain-kit`, and the vault. `git status`
+  each first. `second-brain-dashboard` has a pre-commit hook requiring a
+  `KIT-CHANGELOG.md` entry for changes to staged Kit material.
+
+- [ ] **11.6 Update the board, last.** Post results to
   [apc-ai-course#138](https://github.com/goggledefogger/apc-ai-course/issues/138):
-  what shipped, the before and after numbers from Dan's own vault (it started at
-  7 fresh of 525), confirmation that a new brain from the zip gets verified
-  search with no manual steps, what was decided for existing installs in 9.2, and
-  anything that turned out differently from this tracker's assumptions. Close the
-  issue only if 9.2 left nothing open. Danny and Roy were asked for a read on
-  `CorpusState` and the health field names; answer whatever they raised in the
-  same pass.
+  what shipped, before and after numbers from Dan's vault, confirmation that a
+  fresh download gets verified search with no manual steps, that existing installs
+  now self-heal, that the migration path handles its backlog, and anything that
+  turned out differently from this tracker's assumptions. Answer whatever Danny
+  or Roy raised on `CorpusState` and the health field names. Close the issue if
+  nothing is left open; say what is left if something is.
 
 ---
 

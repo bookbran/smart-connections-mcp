@@ -86,16 +86,36 @@ AS YOU GO
 IN CHAT: one thing at a time, short. Report what shipped and what broke, not
 what you are about to do. Dan has inattentive ADHD and a dumped list stalls him.
 
-TWO THINGS TO CONFIRM WITH DAN BEFORE BUILDING ON THEM
-- Phase 1.3: whether the Smart Connections hash is reproducible from file
-  contents decides the whole freshness predicate. Investigate first, report the
-  finding, then build. Do not guess and proceed.
-- Phase 6: the health field names are a surface agents will code against.
-  Show the proposed shape before implementing it.
+RUN IT ALL, IN ONE PASS, WITHOUT CHECKPOINTS
+Dan's explicit instruction: do not come back to him with decisions. The tracker's
+"Decisions already made" table answers every question this build previously held
+open, including the two that used to say "bring it to Dan". Make the calls,
+build it, verify it, ship it.
+- Do NOT stop to confirm a design choice, a field name, a threshold, an ordering,
+  or which of two reasonable options to take. Pick the better one and note why in
+  the progress log.
+- DO stop for real harm only: destroying a member's data, force-pushing over
+  someone else's work, a dirty tree this build did not create, or anything a
+  `git revert` cannot undo. That is ordinary care, not a checkpoint.
+- If a decision in the tracker turns out wrong once it meets the code, change it,
+  record the reason in the progress log, and keep going. A tracker decision is a
+  starting position, not a cage. Stalling on it is the only wrong move.
 
-THE BUILD IS NOT DONE WHEN THE ENGINE IS FIXED. Phase 9 rebuilds the Astrolabe
-zip, cuts a kit release, deploys it, and reports results to the board. A fix that
-only runs on Dan's machine has not helped the person the kit was built for.
+THE STRATEGIC SITUATION, which should shape the tradeoffs
+Almost nobody is running this system yet. The population that could ever
+experience the broken version is tiny. So a fresh download can simply be
+correct, and everything else is a small patch. When a tradeoff pits fresh-install
+quality against backwards compatibility, fresh install wins.
+
+THE BUILD IS NOT DONE WHEN THE ENGINE IS FIXED.
+- Phase 9 is the fresh-download path: a brain that has never existed comes up
+  with verified-current search and nobody types a command.
+- Phase 10 is migration, where the backlog actually bites: a migrated vault
+  arrives with hundreds of notes at once and often a stale `.smart-env` from an
+  Obsidian install the member stopped opening. `MIGRATE.md` gets a real search
+  step, and it is Kit material so its commit needs a KIT-CHANGELOG entry.
+- Phase 11 rebuilds the zip, cuts and deploys the kit release, leaves Dan's own
+  vault working, pushes all four repos, and reports to the board last.
 
 Start by reading the tracker, then run `git log --oneline -5` in the repo to
 confirm it matches what the tracker claims, then begin Phase 1.1.
@@ -115,17 +135,33 @@ remove.
 Phases 5 through 8 are propagation and hardening. They are safe to start a
 separate sitting on, and the tracker's own resume section covers picking them up.
 
-**Phase 9 is not optional and is not cleanup.** It rebuilds the Astrolabe zip,
-cuts and deploys a kit release, and reports to the board. Everything before it
-only fixes the engine on the machine it was built on; Phase 9 is what reaches a
-member who downloads the zip. Note the thing it opens with: the zip contains the
-installer, not the bridge, so a merge to `main` reaches every new brain and no
-existing one. Verify that rather than assuming it.
+**Phases 9 through 11 are the point, not cleanup.** Everything before them fixes
+the engine on the machine it was built on. Phase 9 is what reaches someone who
+downloads the zip, Phase 10 is what reaches someone bringing an existing vault
+in, and Phase 11 puts it on the kit site.
+
+Note the thing Phase 9 opens with: the zip contains the installer, not the
+bridge, so a merge to `main` reaches every new brain and no existing one. That
+asymmetry is why Phase 9.2 exists, and it is a claim to verify rather than
+assume.
+
+## It runs unattended
+
+There are no checkpoints. The tracker's "Decisions already made" table settles
+every open question, including the freshness fallback and the health field names,
+which previously said "ask Dan". The build makes its own calls, records them in
+the progress log, and runs to completion. The only stop condition is real,
+irreversible harm.
 
 ## If the hash turns out not to be reproducible
 
-Phase 1.3 is the one genuine unknown. The fallback is `size` equality plus a
-tight mtime epsilon, which is already known to catch both documented cases (the
-stale entry records `size: 2121` against 6418 bytes on disk). That is a smaller
-result, not a blocked one, so report it and keep going rather than stalling the
-phase.
+Phase 1.3 is the one genuine unknown, and it is not a blocker. The fallback is
+decided and written into the tracker: `size` exact match AND
+`last_import.mtime >= file.mtimeMs - 2`. Two milliseconds covers JSON round-trip
+precision loss and nothing else, and a size mismatch is stale regardless of any
+timestamp. Both documented cases are already caught by size alone (the stale
+entry records `size: 2121` against 6418 bytes on disk).
+
+So: investigate the hash because it is strictly better if it works, take the
+fallback if it does not, note which one you used in the progress log, and keep
+moving. Do not stall the phase on it and do not come back to ask.
