@@ -39,6 +39,19 @@ export declare class SearchEngine {
      * answered from a cache.
      */
     private probeCache;
+    /**
+     * What unrelated text scores against THIS corpus, cached per generation.
+     *
+     * Fixed gibberish anchors, embedded once per corpus generation and scored
+     * against every vector the corpus holds. The anchors are constants, not
+     * random, so two runs measure the same thing. Why this exists: absolute
+     * similarity floors sit below the embedding model's baseline for unrelated
+     * text (measured: pure gibberish at 0.62-0.64 on bge-micro-v2, sailing over
+     * the 0.4 default threshold), so a query about something absent from the
+     * vault returns a confident-looking list and the empty-result honesty
+     * machinery never fires — gibberish never produces an empty result.
+     */
+    private noiseCache;
     constructor(loader: SmartConnectionsLoader);
     /**
      * Semantic search over the vault.
@@ -49,6 +62,27 @@ export declare class SearchEngine {
      * synchronously.
      */
     searchByQuery(queryText: string, limit?: number, threshold?: number): Promise<SearchResponse>;
+    /**
+     * Fixed anchors. Changing these changes what every vault measures; don't.
+     *
+     * Eight rather than three, and deliberately varied in token count and
+     * shape, because the ceiling is a MAX over samples from a distribution:
+     * measured while building this, a fourth gibberish string scored 0.527
+     * against a ceiling of 0.513 taken from only three anchors. More samples
+     * push the measured max toward the distribution's real tail. Length varies
+     * because similarity drifts with token count on these models.
+     */
+    private static readonly NOISE_ANCHORS;
+    /**
+     * Measure (or reuse) the noise ceiling for this corpus generation.
+     *
+     * Never blocks or fails a search: any trouble here returns null and the
+     * envelope simply omits the field. Cost when it does run: three short
+     * embeds on a model that is already loaded, then cosine over vectors
+     * already in memory. Cached per generation, exactly like the probe cache
+     * and for the same reason — machinery does not change between queries.
+     */
+    private noiseCeilingFor;
     /**
      * Which pending notes to repair first (tracker 7.2).
      *
@@ -179,6 +213,16 @@ export declare class SearchEngine {
      */
     refreshSearchIndex(budget?: number): Promise<RefreshReport>;
     private buildResponse;
+    /**
+     * Results that only score what gibberish scores are not findings.
+     *
+     * This closes the gap the empty-result machinery cannot reach: a query about
+     * something ABSENT never returns empty (ranking always ranks something), so
+     * `negativeResultsTrustworthy` never gets its moment. The comparison is
+     * against the top result: if even the best hit sits at or under the measured
+     * noise ceiling, the whole list is unrelated text wearing scores.
+     */
+    private noiseWarning;
     /**
      * Coverage by SET DIFFERENCE, never by adding counts (tracker 4.1).
      *
