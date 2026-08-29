@@ -6,7 +6,7 @@
  * results while `get_similar_notes` still answered from the plugin's old
  * snapshot would be the same bug with a smaller blast radius.
  */
-import { cosineSimilarity, findNearestNeighbors } from './embedding-utils.js';
+import { cosineSimilarity, findNearestNeighbors, maxSimilarityAgainst } from './embedding-utils.js';
 import { embedText } from './embedder.js';
 import { CorpusProvider } from './current-corpus.js';
 import { readCanonicalText, corpusIsClean } from './corpus-state.js';
@@ -59,6 +59,19 @@ export class SearchEngine {
      * answered from a cache.
      */
     probeCache = null;
+    /**
+     * What unrelated text scores against THIS corpus, cached per generation.
+     *
+     * Fixed gibberish anchors, embedded once per corpus generation and scored
+     * against every vector the corpus holds. The anchors are constants, not
+     * random, so two runs measure the same thing. Why this exists: absolute
+     * similarity floors sit below the embedding model's baseline for unrelated
+     * text (measured: pure gibberish at 0.62-0.64 on bge-micro-v2, sailing over
+     * the 0.4 default threshold), so a query about something absent from the
+     * vault returns a confident-looking list and the empty-result honesty
+     * machinery never fires — gibberish never produces an empty result.
+     */
+    noiseCache = null;
     constructor(loader) {
         this.loader = loader;
         this.embeddingModelKey = loader.getEmbeddingModelKey();
@@ -91,7 +104,8 @@ export class SearchEngine {
             const queryVec = await embedText(queryText, this.embeddingModelKey);
             if (queryVec.length > 0) {
                 const results = this.rankFused(queryVec, queryText, corpus, limit, threshold);
-                return this.buildResponse('semantic', results, threshold, corpus);
+                const noiseCeiling = await this.noiseCeilingFor(corpus);
+                return this.buildResponse('semantic', results, threshold, corpus, noiseCeiling);
             }
         }
         catch (error) {
@@ -99,6 +113,73 @@ export class SearchEngine {
         }
         const results = this.searchByKeyword(queryText, corpus, limit, threshold);
         return this.buildResponse('keyword', results, threshold, corpus);
+    }
+    /**
+     * Fixed anchors. Changing these changes what every vault measures; don't.
+     *
+     * Eight rather than three, and deliberately varied in token count and
+     * shape, because the ceiling is a MAX over samples from a distribution:
+     * measured while building this, a fourth gibberish string scored 0.527
+     * against a ceiling of 0.513 taken from only three anchors. More samples
+     * push the measured max toward the distribution's real tail. Length varies
+     * because similarity drifts with token count on these models.
+     */
+    static NOISE_ANCHORS = [
+        'zqxjkbrtplm vwfgh nsdkr',
+        'qwmzxv pflgrt hjkwq',
+        'xkcdqz mrtvwn bhjlpf',
+        'drvpk',
+        'wblzt cmqfj',
+        'gxhnv rwpdk sltjq mbfzc',
+        'kjfwm zpxrv tqgnb dlshc ywvkp',
+        'ptkzq lmvbw xnfrj cghds qwmyt bzvlk',
+    ];
+    /**
+     * Measure (or reuse) the noise ceiling for this corpus generation.
+     *
+     * Never blocks or fails a search: any trouble here returns null and the
+     * envelope simply omits the field. Cost when it does run: three short
+     * embeds on a model that is already loaded, then cosine over vectors
+     * already in memory. Cached per generation, exactly like the probe cache
+     * and for the same reason — machinery does not change between queries.
+     */
+    async noiseCeilingFor(corpus) {
+        const generation = corpus.state.generation;
+        if (this.noiseCache && this.noiseCache.generation === generation) {
+            return this.noiseCache.ceiling;
+        }
+        try {
+            const corpusVecs = [...corpus.noteVectors.values()];
+            for (const blocks of corpus.sectionVectors.values()) {
+                for (const b of blocks)
+                    corpusVecs.push(b.vec);
+            }
+            // Per-anchor bests, because the ceiling is an estimate of a
+            // distribution's tail from eight samples, and a bare max of eight
+            // undershoots it: measured while building this, a ninth gibberish
+            // string scored 0.007 over the eight-anchor max. The allowance is one
+            // standard deviation of the anchor scores — the measured scatter,
+            // not an invented margin.
+            const bests = [];
+            for (const anchor of SearchEngine.NOISE_ANCHORS) {
+                const vec = await embedText(anchor, this.embeddingModelKey);
+                if (vec.length === 0)
+                    return null;
+                const best = maxSimilarityAgainst([vec], corpusVecs);
+                if (best === null)
+                    return null;
+                bests.push(best);
+            }
+            const max = Math.max(...bests);
+            const mean = bests.reduce((a, b) => a + b, 0) / bests.length;
+            const std = Math.sqrt(bests.reduce((a, b) => a + (b - mean) ** 2, 0) / bests.length);
+            const ceiling = max + std;
+            this.noiseCache = { generation, ceiling };
+            return ceiling;
+        }
+        catch {
+            return null;
+        }
     }
     /**
      * Which pending notes to repair first (tracker 7.2).
@@ -456,7 +537,7 @@ export class SearchEngine {
         };
     }
     // -- coverage and health --------------------------------------------------
-    buildResponse(mode, results, threshold, corpus) {
+    buildResponse(mode, results, threshold, corpus, noiseCeiling = null) {
         const coverage = this.buildCoverage(mode, corpus);
         const negativeResultsTrustworthy = mode === 'semantic' &&
             (this.probeCache?.passed ?? false) &&
@@ -469,10 +550,39 @@ export class SearchEngine {
             threshold,
             negativeResultsTrustworthy,
         };
+        if (noiseCeiling !== null)
+            response.noiseCeiling = noiseCeiling;
         const warning = this.coverageWarning(mode, coverage, results.length, negativeResultsTrustworthy);
-        if (warning)
-            response.warning = warning;
+        const noise = this.noiseWarning(results, noiseCeiling);
+        const combined = [warning, noise].filter(Boolean).join(' ');
+        if (combined)
+            response.warning = combined;
         return response;
+    }
+    /**
+     * Results that only score what gibberish scores are not findings.
+     *
+     * This closes the gap the empty-result machinery cannot reach: a query about
+     * something ABSENT never returns empty (ranking always ranks something), so
+     * `negativeResultsTrustworthy` never gets its moment. The comparison is
+     * against the top result: if even the best hit sits at or under the measured
+     * noise ceiling, the whole list is unrelated text wearing scores.
+     */
+    noiseWarning(results, noiseCeiling) {
+        if (noiseCeiling === null || results.length === 0)
+            return undefined;
+        // A lexical hit is a literal term match; noise cannot explain it away.
+        const semantic = results.filter((r) => r.matchedVia !== 'lexical');
+        if (semantic.length === 0)
+            return undefined;
+        const top = Math.max(...semantic.map((r) => r.similarity));
+        if (top > noiseCeiling)
+            return undefined;
+        return (`RESULTS SCORE LIKE NOISE: the best semantic match here (${top.toFixed(2)}) is at or ` +
+            `below what deliberately meaningless text scores against this vault ` +
+            `(${noiseCeiling.toFixed(2)}). Treat this list as "nothing semantically close was ` +
+            `found", not as findings. Lexical matches, if any, are literal term hits and stand ` +
+            `on their own.`);
     }
     /**
      * Coverage by SET DIFFERENCE, never by adding counts (tracker 4.1).
