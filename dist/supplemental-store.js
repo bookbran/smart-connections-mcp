@@ -114,6 +114,14 @@ export function saveSupplementalCache(vaultPath, cache) {
         // save and every startup re-embedded the whole vault, which is precisely
         // the no-Obsidian case this server exists to support.
         mkdirSync(join(vaultPath, '.smart-env'), { recursive: true });
+        // The cache is megabytes of vectors written INSIDE a vault that is very
+        // often a git repo, and no vault's own .gitignore can be assumed to cover
+        // it — measured 2026-08-28: an 8MB cache sitting untracked in a live
+        // vault, one `git add -A` from history. The directory ignores itself; a
+        // member's own ignore file, if they wrote one here, is never rewritten.
+        const selfIgnore = join(vaultPath, '.smart-env', '.gitignore');
+        if (!existsSync(selfIgnore))
+            writeFileSync(selfIgnore, '*\n', 'utf-8');
         writeFileSync(join(vaultPath, SUPPLEMENTAL_CACHE_FILE), JSON.stringify(cache), 'utf-8');
     }
     catch {

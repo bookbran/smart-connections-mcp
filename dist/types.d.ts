@@ -175,6 +175,14 @@ export interface SearchResponse {
      * thing rather than reconstructing a predicate from four numbers.
      */
     negativeResultsTrustworthy: boolean;
+    /**
+     * What deliberately meaningless text scores against this vault, measured per
+     * corpus generation with fixed gibberish anchors. A result at or below it is
+     * unrelated text wearing a score. Present only in semantic mode when the
+     * measurement succeeded; compare `results[].similarity` against it before
+     * treating a thin match as a finding.
+     */
+    noiseCeiling?: number;
     /** Present only when the answer should not be read at face value. */
     warning?: string;
 }
